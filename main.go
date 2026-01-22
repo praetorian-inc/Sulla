@@ -15,6 +15,8 @@ import (
 	"time"
 )
 
+const dockerImage = "ghcr.io/praetorian-inc/noseyparker:latest"
+
 type Config struct {
 	Host               string
 	Share              string
@@ -25,8 +27,10 @@ type Config struct {
 	NoExclusion        bool
 	AdditionalExts     []string
 	AdditionalFolders  []string
+	SaveOutput         bool
 	OutputFile         string
 	Verbose            bool
+	UseDocker          bool
 }
 
 // Default file extensions to exclude (binaries, media, archives, etc.)
@@ -73,11 +77,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Check if noseyparker is available
+	// Check if noseyparker is available (native or Docker)
 	if _, err := exec.LookPath("noseyparker"); err != nil {
-		fmt.Fprintln(os.Stderr, "Error: noseyparker not found in PATH")
-		fmt.Fprintln(os.Stderr, "Please install it from: https://github.com/praetorian-inc/noseyparker")
-		os.Exit(1)
+		// Native not found, try Docker
+		if dockerAvailable() {
+			config.UseDocker = true
+			fmt.Fprintln(os.Stderr, "[*] noseyparker not in PATH, using Docker")
+		} else {
+			fmt.Fprintln(os.Stderr, "Error: noseyparker not found in PATH nor via Docker")
+			fmt.Fprintln(os.Stderr, "Install noseyparker: https://github.com/praetorian-inc/noseyparker")
+			fmt.Fprintln(os.Stderr, "To install via Docker, run:")
+			fmt.Fprintln(os.Stderr, "  docker pull ghcr.io/praetorian-inc/noseyparker:latest")
+			os.Exit(1)
+		}
 	}
 
 	// Create temporary mount point
@@ -125,6 +137,9 @@ func parseArgs() Config {
 	var additionalExts string
 	var additionalFolders string
 
+	// Pre-process -o flag (supports optional argument) before flag.Parse()
+	config.SaveOutput, config.OutputFile, os.Args = extractOutputFlag(os.Args)
+
 	flag.StringVar(&config.Host, "host", "", "Target IP address or hostname (required)")
 	flag.StringVar(&config.Host, "h", "", "Target IP address or hostname (shorthand)")
 	flag.StringVar(&config.Share, "share", "", "SMB share name (required)")
@@ -141,8 +156,7 @@ func parseArgs() Config {
 	flag.StringVar(&additionalExts, "exclude", "", "Additional file extensions to exclude (comma-separated, e.g., 'log,tmp,bak')")
 	flag.StringVar(&additionalFolders, "exclude-folder", "", "Additional folder names to exclude (comma-separated, e.g., 'temp,cache')")
 
-	// Output options
-	flag.StringVar(&config.OutputFile, "o", "", "Save report output to file (in addition to terminal)")
+	// Output options (note: -o is handled manually after flag.Parse for optional argument support)
 	flag.BoolVar(&config.Verbose, "v", false, "Verbose output (show excluded files)")
 
 	flag.Usage = func() {
@@ -160,7 +174,7 @@ func parseArgs() Config {
 		fmt.Fprintln(os.Stderr, "  -exclude            Additional file extensions to exclude (comma-separated)")
 		fmt.Fprintln(os.Stderr, "  -exclude-folder     Additional folder names to exclude (comma-separated)")
 		fmt.Fprintln(os.Stderr, "\nOutput:")
-		fmt.Fprintln(os.Stderr, "  -o                  Save report output to file (in addition to terminal)")
+		fmt.Fprintln(os.Stderr, "  -o [filename]       Save report to file (default: <host>_<share>.txt)")
 		fmt.Fprintln(os.Stderr, "  -v                  Verbose output (show excluded files)")
 		fmt.Fprintln(os.Stderr, "\nBuilt-in Exclusions (enabled by default):")
 		fmt.Fprintln(os.Stderr, "  File Extensions:")
@@ -197,7 +211,39 @@ func parseArgs() Config {
 		}
 	}
 
+	// Generate default output filename if -o was used without a filename
+	if config.SaveOutput && config.OutputFile == "" {
+		config.OutputFile = generateOutputFilename(config.Host, config.Share)
+	}
+
 	return config
+}
+
+func generateOutputFilename(host, share string) string {
+	// Replace dots with underscores in host
+	sanitizedHost := strings.ReplaceAll(host, ".", "_")
+	return fmt.Sprintf("%s_%s.txt", sanitizedHost, share)
+}
+
+func extractOutputFlag(args []string) (bool, string, []string) {
+	var newArgs []string
+	saveOutput := false
+	outputFile := ""
+
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-o" {
+			saveOutput = true
+			// Check if next argument exists and is not a flag
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				outputFile = args[i+1]
+				i++ // Skip the filename argument
+			}
+			continue
+		}
+		newArgs = append(newArgs, args[i])
+	}
+
+	return saveOutput, outputFile, newArgs
 }
 
 func createMountPoint() (string, error) {
@@ -222,6 +268,11 @@ func mountSMB(config Config) error {
 		return mountSMBMacOS(config)
 	}
 	return mountSMBLinux(config)
+}
+
+func dockerAvailable() bool {
+	cmd := exec.Command("docker", "info")
+	return cmd.Run() == nil
 }
 
 func resolveHostToIP(host string) string {
@@ -525,13 +576,6 @@ func runNoseyparker(config Config) error {
 		tmpIgnore.Close()
 	}
 
-	// Build scan command
-	args := []string{"scan", "--datastore", datastore}
-	if ignoreFile != "" {
-		args = append(args, "--ignore", ignoreFile)
-	}
-	args = append(args, scanPath)
-
 	// Show exclusion info
 	if !config.NoExclusion {
 		fmt.Fprintf(os.Stderr, "[*] Using default exclusions (%d extensions, %d folders)\n",
@@ -549,26 +593,124 @@ func runNoseyparker(config Config) error {
 
 	// Run noseyparker scan
 	fmt.Fprintf(os.Stderr, "[*] Scanning %s...\n", scanPath)
-	scanCmd := exec.Command("noseyparker", args...)
-	scanCmd.Stderr = os.Stderr
-	if err := scanCmd.Run(); err != nil {
-		return fmt.Errorf("noseyparker scan failed: %w", err)
+	if err := runNoseyparkerScan(config, scanPath, datastorePath, datastore, ignoreFile); err != nil {
+		return err
 	}
 
-	// Check for findings first
-	summaryCmd := exec.Command("noseyparker", "summarize", "--datastore", datastore)
-	summaryCmd.Stderr = os.Stderr
-	summaryOutput, err := summaryCmd.Output()
+	// Check for findings
+	hasFindings, err := checkForFindings(config, datastorePath)
 	if err != nil {
 		// summarize might not exist in older versions, continue anyway
 		fmt.Fprintln(os.Stderr, "[*] Note: Could not get summary (may be using older noseyparker version)")
-	} else {
-		fmt.Fprintln(os.Stderr, string(summaryOutput))
+		hasFindings = true // Assume there might be findings
+	}
+
+	if !hasFindings {
+		fmt.Fprintln(os.Stderr, "[*] No secrets discovered in this share.")
+		return nil
 	}
 
 	// Run noseyparker report to stdout (and optionally to file)
-	reportCmd := exec.Command("noseyparker", "report", "--datastore", datastore)
-	reportCmd.Stderr = os.Stderr
+	if err := runNoseyparkerReport(config, datastorePath, datastore); err != nil {
+		return err
+	}
+
+	if config.OutputFile != "" {
+		fmt.Fprintf(os.Stderr, "[+] Report saved to %s\n", config.OutputFile)
+	}
+
+	return nil
+}
+
+func runNoseyparkerScan(config Config, scanPath, datastorePath, datastore, ignoreFile string) error {
+	var cmd *exec.Cmd
+
+	if config.UseDocker {
+		// Build Docker command with volume mounts
+		args := []string{"run", "--rm"}
+
+		// Mount the scan path
+		args = append(args, "-v", fmt.Sprintf("%s:/scan:ro", scanPath))
+
+		// Mount the datastore directory
+		args = append(args, "-v", fmt.Sprintf("%s:/datastore", datastorePath))
+
+		// Mount the ignore file if it exists
+		if ignoreFile != "" {
+			args = append(args, "-v", fmt.Sprintf("%s:/ignore:ro", ignoreFile))
+		}
+
+		args = append(args, dockerImage, "scan", "--datastore", "/datastore/datastore")
+		if ignoreFile != "" {
+			args = append(args, "--ignore", "/ignore")
+		}
+		args = append(args, "/scan")
+
+		cmd = exec.Command("docker", args...)
+	} else {
+		// Native command
+		args := []string{"scan", "--datastore", datastore}
+		if ignoreFile != "" {
+			args = append(args, "--ignore", ignoreFile)
+		}
+		args = append(args, scanPath)
+		cmd = exec.Command("noseyparker", args...)
+	}
+
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func checkForFindings(config Config, datastorePath string) (bool, error) {
+	var cmd *exec.Cmd
+
+	if config.UseDocker {
+		args := []string{"run", "--rm",
+			"-v", fmt.Sprintf("%s:/datastore", datastorePath),
+			dockerImage, "summarize", "--datastore", "/datastore/datastore",
+		}
+		cmd = exec.Command("docker", args...)
+	} else {
+		datastore := filepath.Join(datastorePath, "datastore")
+		cmd = exec.Command("noseyparker", "summarize", "--datastore", datastore)
+	}
+
+	output, err := cmd.Output()
+	if err != nil {
+		return false, err
+	}
+
+	// Check if there are any findings by looking for non-zero numbers in the Findings column
+	// The table format has "Findings" as a column header
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		// Skip header and separator lines
+		if strings.Contains(line, "Rule") || strings.Contains(line, "───") || strings.TrimSpace(line) == "" {
+			continue
+		}
+		// If we have any data row, there are findings
+		if strings.TrimSpace(line) != "" {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+func runNoseyparkerReport(config Config, datastorePath, datastore string) error {
+	var cmd *exec.Cmd
+
+	if config.UseDocker {
+		args := []string{"run", "--rm",
+			"-v", fmt.Sprintf("%s:/datastore", datastorePath),
+			dockerImage, "report", "--datastore", "/datastore/datastore",
+		}
+		cmd = exec.Command("docker", args...)
+	} else {
+		cmd = exec.Command("noseyparker", "report", "--datastore", datastore)
+	}
+
+	cmd.Stderr = os.Stderr
 
 	// Set up output: tee to file if -o is specified
 	if config.OutputFile != "" {
@@ -577,17 +719,13 @@ func runNoseyparker(config Config) error {
 			return fmt.Errorf("failed to create output file: %w", err)
 		}
 		defer outFile.Close()
-		reportCmd.Stdout = io.MultiWriter(os.Stdout, outFile)
+		cmd.Stdout = io.MultiWriter(os.Stdout, outFile)
 	} else {
-		reportCmd.Stdout = os.Stdout
+		cmd.Stdout = os.Stdout
 	}
 
-	if err := reportCmd.Run(); err != nil {
+	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("noseyparker report failed: %w", err)
-	}
-
-	if config.OutputFile != "" {
-		fmt.Fprintf(os.Stderr, "[+] Report saved to %s\n", config.OutputFile)
 	}
 
 	return nil
