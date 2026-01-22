@@ -1,0 +1,624 @@
+package main
+
+import (
+	"flag"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"syscall"
+	"time"
+)
+
+type Config struct {
+	Host               string
+	Share              string
+	Username           string
+	Password           string
+	Domain             string
+	MountPath          string
+	NoExclusion        bool
+	AdditionalExts     []string
+	AdditionalFolders  []string
+	OutputFile         string
+	Verbose            bool
+}
+
+// Default file extensions to exclude (binaries, media, archives, etc.)
+var defaultExcludedExtensions = []string{
+	// Executables and libraries
+	"exe", "dll", "so", "dylib", "bin", "app", "sys", "drv",
+	// Archives
+	"zip", "tar", "gz", "bz2", "xz", "7z", "rar", "iso", "dmg",
+	// Media files
+	"jpg", "jpeg", "png", "gif", "bmp", "ico", "svg", "webp",
+	"mp3", "mp4", "avi", "mov", "mkv", "flv", "wmv", "wav", "flac",
+	// Office documents (binary formats)
+	"doc", "xls", "ppt", "docx", "xlsx", "pptx", "pdf",
+	// Compiled/Object files
+	"pyc", "pyo", "class", "o", "obj", "a", "lib",
+	// Database files
+	"db", "sqlite", "sqlite3", "mdb", "accdb",
+	// Fonts
+	"ttf", "otf", "woff", "woff2", "eot",
+	// Other binary formats
+	"dat", "pak", "cab", "msi", "deb", "rpm",
+}
+
+// Default folders to exclude (system directories, Windows paths, etc.)
+var defaultExcludedFolders = []string{
+	// Windows system folders
+	"Program Files", "Program Files (x86)", "Windows", "System32",
+	"SysWOW64", "WinSxS", "$Recycle.Bin", "ProgramData",
+	// macOS system folders
+	"System", "Library", "Applications",
+	// Linux system folders
+	"proc", "sys", "dev", "boot",
+	// Common large/noisy folders
+	"node_modules", ".git", "__pycache__", "vendor",
+}
+
+func main() {
+	config := parseArgs()
+
+	// Validate required args
+	if config.Host == "" || config.Share == "" {
+		fmt.Fprintln(os.Stderr, "Error: host and share are required")
+		flag.Usage()
+		os.Exit(1)
+	}
+
+	// Check if noseyparker is available
+	if _, err := exec.LookPath("noseyparker"); err != nil {
+		fmt.Fprintln(os.Stderr, "Error: noseyparker not found in PATH")
+		fmt.Fprintln(os.Stderr, "Please install it from: https://github.com/praetorian-inc/noseyparker")
+		os.Exit(1)
+	}
+
+	// Create temporary mount point
+	mountPath, err := createMountPoint()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating mount point: %v\n", err)
+		os.Exit(1)
+	}
+	config.MountPath = mountPath
+
+	// Setup signal handler for cleanup
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		fmt.Fprintln(os.Stderr, "\nReceived interrupt, cleaning up...")
+		cleanup(config)
+		os.Exit(1)
+	}()
+
+	// Mount the SMB share
+	fmt.Fprintf(os.Stderr, "[*] Mounting SMB share //%s/%s...\n", config.Host, config.Share)
+	if err := mountSMB(config); err != nil {
+		fmt.Fprintf(os.Stderr, "Error mounting SMB share: %v\n", err)
+		cleanup(config)
+		os.Exit(1)
+	}
+	fmt.Fprintf(os.Stderr, "[+] Successfully mounted to %s\n", config.MountPath)
+
+	// Run noseyparker
+	fmt.Fprintln(os.Stderr, "[*] Running noseyparker scan...")
+	if err := runNoseyparker(config); err != nil {
+		fmt.Fprintf(os.Stderr, "Error running noseyparker: %v\n", err)
+		cleanup(config)
+		os.Exit(1)
+	}
+
+	// Cleanup
+	cleanup(config)
+	fmt.Fprintln(os.Stderr, "[+] Scan complete")
+}
+
+func parseArgs() Config {
+	var config Config
+	var additionalExts string
+	var additionalFolders string
+
+	flag.StringVar(&config.Host, "host", "", "Target IP address or hostname (required)")
+	flag.StringVar(&config.Host, "h", "", "Target IP address or hostname (shorthand)")
+	flag.StringVar(&config.Share, "share", "", "SMB share name (required)")
+	flag.StringVar(&config.Share, "s", "", "SMB share name (shorthand)")
+	flag.StringVar(&config.Username, "username", "", "Username for authentication (optional)")
+	flag.StringVar(&config.Username, "u", "", "Username for authentication (shorthand)")
+	flag.StringVar(&config.Password, "password", "", "Password for authentication (optional)")
+	flag.StringVar(&config.Password, "p", "", "Password for authentication (shorthand)")
+	flag.StringVar(&config.Domain, "domain", "", "Domain for authentication (optional)")
+	flag.StringVar(&config.Domain, "d", "", "Domain for authentication (shorthand)")
+
+	// Exclusion options
+	flag.BoolVar(&config.NoExclusion, "no-exclusion", false, "Disable all default exclusions (scan all files/folders)")
+	flag.StringVar(&additionalExts, "exclude", "", "Additional file extensions to exclude (comma-separated, e.g., 'log,tmp,bak')")
+	flag.StringVar(&additionalFolders, "exclude-folder", "", "Additional folder names to exclude (comma-separated, e.g., 'temp,cache')")
+
+	// Output options
+	flag.StringVar(&config.OutputFile, "o", "", "Save report output to file (in addition to terminal)")
+	flag.BoolVar(&config.Verbose, "v", false, "Verbose output (show excluded files)")
+
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: %s [options]\n\n", os.Args[0])
+		fmt.Fprintln(os.Stderr, "A tool to mount SMB shares and scan for secrets using Noseyparker")
+		fmt.Fprintln(os.Stderr, "\nRequired:")
+		fmt.Fprintln(os.Stderr, "  -host, -h           Target IP address or hostname")
+		fmt.Fprintln(os.Stderr, "  -share, -s          SMB share name")
+		fmt.Fprintln(os.Stderr, "\nAuthentication:")
+		fmt.Fprintln(os.Stderr, "  -username, -u       Username for authentication")
+		fmt.Fprintln(os.Stderr, "  -password, -p       Password for authentication")
+		fmt.Fprintln(os.Stderr, "  -domain, -d         Domain for authentication")
+		fmt.Fprintln(os.Stderr, "\nFiltering:")
+		fmt.Fprintln(os.Stderr, "  -no-exclusion       Disable all default exclusions (scan everything)")
+		fmt.Fprintln(os.Stderr, "  -exclude            Additional file extensions to exclude (comma-separated)")
+		fmt.Fprintln(os.Stderr, "  -exclude-folder     Additional folder names to exclude (comma-separated)")
+		fmt.Fprintln(os.Stderr, "\nOutput:")
+		fmt.Fprintln(os.Stderr, "  -o                  Save report output to file (in addition to terminal)")
+		fmt.Fprintln(os.Stderr, "  -v                  Verbose output (show excluded files)")
+		fmt.Fprintln(os.Stderr, "\nBuilt-in Exclusions (enabled by default):")
+		fmt.Fprintln(os.Stderr, "  File Extensions:")
+		fmt.Fprintf(os.Stderr, "    %s\n", strings.Join(defaultExcludedExtensions, ", "))
+		fmt.Fprintln(os.Stderr, "  Folders:")
+		fmt.Fprintf(os.Stderr, "    %s\n", strings.Join(defaultExcludedFolders, ", "))
+		fmt.Fprintln(os.Stderr, "\nExamples:")
+		fmt.Fprintln(os.Stderr, "  # Basic scan with default exclusions")
+		fmt.Fprintf(os.Stderr, "  %s -host 192.168.1.100 -share public\n\n", os.Args[0])
+		fmt.Fprintln(os.Stderr, "  # Scan everything (no exclusions)")
+		fmt.Fprintf(os.Stderr, "  %s -h 192.168.1.100 -s public -no-exclusion\n\n", os.Args[0])
+		fmt.Fprintln(os.Stderr, "  # With additional exclusions")
+		fmt.Fprintf(os.Stderr, "  %s -h 192.168.1.100 -s docs -exclude log,tmp -exclude-folder cache,backup\n\n", os.Args[0])
+		fmt.Fprintln(os.Stderr, "  # With domain credentials")
+		fmt.Fprintf(os.Stderr, "  %s -h dc01.corp.local -s SYSVOL -u admin -p secret123 -d CORP\n", os.Args[0])
+	}
+
+	flag.Parse()
+
+	// Parse comma-separated lists
+	if additionalExts != "" {
+		config.AdditionalExts = strings.Split(additionalExts, ",")
+		// Trim spaces
+		for i, ext := range config.AdditionalExts {
+			config.AdditionalExts[i] = strings.TrimSpace(ext)
+		}
+	}
+
+	if additionalFolders != "" {
+		config.AdditionalFolders = strings.Split(additionalFolders, ",")
+		// Trim spaces
+		for i, folder := range config.AdditionalFolders {
+			config.AdditionalFolders[i] = strings.TrimSpace(folder)
+		}
+	}
+
+	return config
+}
+
+func createMountPoint() (string, error) {
+	if runtime.GOOS == "windows" {
+		// On Windows, we'll use a drive letter or UNC path directly
+		// Return empty - we'll handle differently
+		return "", nil
+	}
+
+	// On Linux/Unix, create a temp directory
+	tmpDir, err := os.MkdirTemp("", "smb-scanner-*")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp directory: %w", err)
+	}
+	return tmpDir, nil
+}
+
+func mountSMB(config Config) error {
+	if runtime.GOOS == "windows" {
+		return mountSMBWindows(config)
+	} else if runtime.GOOS == "darwin" {
+		return mountSMBMacOS(config)
+	}
+	return mountSMBLinux(config)
+}
+
+func resolveHostToIP(host string) string {
+	// If it's already an IP address, return as-is
+	if net.ParseIP(host) != nil {
+		return host
+	}
+
+	// Try to resolve hostname to IP
+	addrs, err := net.LookupHost(host)
+	if err == nil && len(addrs) > 0 {
+		return addrs[0]
+	}
+
+	// If resolution fails, return original host
+	return host
+}
+
+func mountSMBLinux(config Config) error {
+	// Build mount options
+	uncPath := fmt.Sprintf("//%s/%s", config.Host, config.Share)
+
+	var baseOpts []string
+
+	if config.Username != "" {
+		baseOpts = append(baseOpts, fmt.Sprintf("username=%s", config.Username))
+	} else {
+		baseOpts = append(baseOpts, "guest")
+	}
+
+	if config.Password != "" {
+		baseOpts = append(baseOpts, fmt.Sprintf("password=%s", config.Password))
+	}
+
+	if config.Domain != "" {
+		baseOpts = append(baseOpts, fmt.Sprintf("domain=%s", config.Domain))
+	}
+
+	// Add common options for better compatibility
+	baseOpts = append(baseOpts, "ro") // Read-only for safety
+	baseOpts = append(baseOpts, "nounix") // Disable Unix extensions
+	baseOpts = append(baseOpts, "noserverino") // Don't use server-assigned inode numbers
+
+	// Resolve hostname to IP and pass to mount.cifs via ip= option
+	// This helps when kernel CIFS has DNS resolution issues
+	resolvedIP := resolveHostToIP(config.Host)
+	baseOpts = append(baseOpts, fmt.Sprintf("ip=%s", resolvedIP))
+
+	// Try different SMB versions (Impacket supports 2.0, try that first)
+	versions := []string{"2.0", "2.1", "3.0", "1.0"}
+
+	var lastErr error
+	var lastOutput string
+
+	for _, version := range versions {
+		mountOpts := make([]string, len(baseOpts))
+		copy(mountOpts, baseOpts)
+		mountOpts = append(mountOpts, fmt.Sprintf("vers=%s", version))
+
+		optString := strings.Join(mountOpts, ",")
+
+		cmd := exec.Command("mount", "-t", "cifs", uncPath, config.MountPath, "-o", optString)
+		output, err := cmd.CombinedOutput()
+		if err == nil {
+			fmt.Fprintf(os.Stderr, "[+] Successfully mounted using SMB %s\n", version)
+			return nil
+		}
+
+		lastErr = err
+		lastOutput = string(output)
+
+		// If we get a protocol negotiation error, try next version
+		if strings.Contains(lastOutput, "Protocol negotiation failed") ||
+		   strings.Contains(lastOutput, "Connection refused") ||
+		   strings.Contains(lastOutput, "could not connect") {
+			continue
+		}
+
+		// If it's a different error (auth, permission, etc), stop trying
+		break
+	}
+
+	// All versions failed
+	return fmt.Errorf("mount failed: %v\nOutput: %s\nNote: This may require root privileges. Try running with sudo.", lastErr, lastOutput)
+}
+
+func mountSMBMacOS(config Config) error {
+	// Build SMB URL for macOS
+	// Format: //[DOMAIN;]username[:password]@server/share
+	var smbURL string
+
+	if config.Username != "" {
+		auth := config.Username
+		if config.Domain != "" {
+			auth = fmt.Sprintf("%s;%s", config.Domain, config.Username)
+		}
+		if config.Password != "" {
+			auth = fmt.Sprintf("%s:%s", auth, config.Password)
+		}
+		smbURL = fmt.Sprintf("//%s@%s/%s", auth, config.Host, config.Share)
+	} else {
+		// Guest access
+		smbURL = fmt.Sprintf("//%s/%s", config.Host, config.Share)
+	}
+
+	// Use mount_smbfs (macOS-specific SMB mount command)
+	cmd := exec.Command("mount_smbfs", "-o", "ro", smbURL, config.MountPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("mount_smbfs failed: %v\nOutput: %s", err, string(output))
+	}
+
+	return nil
+}
+
+func mountSMBWindows(config Config) error {
+	uncPath := fmt.Sprintf("\\\\%s\\%s", config.Host, config.Share)
+
+	// Build net use command
+	args := []string{"use", uncPath}
+
+	if config.Password != "" {
+		args = append(args, config.Password)
+	}
+
+	if config.Username != "" {
+		user := config.Username
+		if config.Domain != "" {
+			user = fmt.Sprintf("%s\\%s", config.Domain, config.Username)
+		}
+		args = append(args, "/user:"+user)
+	}
+
+	cmd := exec.Command("net", args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("net use failed: %v\nOutput: %s", err, string(output))
+	}
+
+	return nil
+}
+
+func buildIgnorePatterns(config Config) []string {
+	var patterns []string
+
+	// Add default exclusions unless disabled
+	if !config.NoExclusion {
+		// Add file extension patterns
+		for _, ext := range defaultExcludedExtensions {
+			patterns = append(patterns, fmt.Sprintf("**/*.%s", ext))
+		}
+
+		// Add folder patterns
+		for _, folder := range defaultExcludedFolders {
+			patterns = append(patterns, fmt.Sprintf("**/%s/**", folder))
+		}
+	}
+
+	// Add additional custom extensions
+	for _, ext := range config.AdditionalExts {
+		patterns = append(patterns, fmt.Sprintf("**/*.%s", ext))
+	}
+
+	// Add additional custom folders
+	for _, folder := range config.AdditionalFolders {
+		patterns = append(patterns, fmt.Sprintf("**/%s/**", folder))
+	}
+
+	return patterns
+}
+
+func getExcludedExtensions(config Config) []string {
+	var exts []string
+	if !config.NoExclusion {
+		exts = append(exts, defaultExcludedExtensions...)
+	}
+	exts = append(exts, config.AdditionalExts...)
+	return exts
+}
+
+func getExcludedFolders(config Config) []string {
+	var folders []string
+	if !config.NoExclusion {
+		folders = append(folders, defaultExcludedFolders...)
+	}
+	folders = append(folders, config.AdditionalFolders...)
+	return folders
+}
+
+func matchesExtension(filename string, extensions []string) (bool, string) {
+	ext := strings.TrimPrefix(filepath.Ext(filename), ".")
+	if ext == "" {
+		return false, ""
+	}
+	ext = strings.ToLower(ext)
+	for _, excludedExt := range extensions {
+		if strings.ToLower(excludedExt) == ext {
+			return true, fmt.Sprintf("**/*.%s", excludedExt)
+		}
+	}
+	return false, ""
+}
+
+func containsExcludedFolder(path string, folders []string) (bool, string) {
+	pathParts := strings.Split(filepath.ToSlash(path), "/")
+	for _, part := range pathParts {
+		for _, folder := range folders {
+			if part == folder {
+				return true, fmt.Sprintf("**/%s/**", folder)
+			}
+		}
+	}
+	return false, ""
+}
+
+func reportExclusions(scanPath string, config Config) {
+	if !config.Verbose {
+		return
+	}
+
+	excludedExts := getExcludedExtensions(config)
+	excludedFolders := getExcludedFolders(config)
+
+	if len(excludedExts) == 0 && len(excludedFolders) == 0 {
+		return
+	}
+
+	fmt.Fprintln(os.Stderr, "[*] Checking for excluded files...")
+
+	filepath.Walk(scanPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // Skip files we can't access
+		}
+
+		// Get relative path for cleaner output
+		relPath, _ := filepath.Rel(scanPath, path)
+		if relPath == "." {
+			return nil
+		}
+
+		// Check folder exclusions first
+		if matched, rule := containsExcludedFolder(relPath, excludedFolders); matched {
+			timestamp := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
+			fmt.Fprintf(os.Stderr, "%s  WARN exclusion: Skipping entry: %s (matched rule: %s)\n", timestamp, relPath, rule)
+			if info.IsDir() {
+				return filepath.SkipDir // Skip entire directory
+			}
+			return nil
+		}
+
+		// Check file extension exclusions
+		if !info.IsDir() {
+			if matched, rule := matchesExtension(info.Name(), excludedExts); matched {
+				timestamp := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
+				fmt.Fprintf(os.Stderr, "%s  WARN exclusion: Skipping entry: %s (matched rule: %s)\n", timestamp, relPath, rule)
+			}
+		}
+
+		return nil
+	})
+}
+
+func runNoseyparker(config Config) error {
+	var scanPath string
+
+	if runtime.GOOS == "windows" {
+		scanPath = fmt.Sprintf("\\\\%s\\%s", config.Host, config.Share)
+	} else {
+		scanPath = config.MountPath
+	}
+
+	// Create a temporary datastore for noseyparker
+	datastorePath, err := os.MkdirTemp("", "np-datastore-*")
+	if err != nil {
+		return fmt.Errorf("failed to create datastore directory: %w", err)
+	}
+	defer os.RemoveAll(datastorePath)
+
+	datastore := filepath.Join(datastorePath, "datastore")
+
+	// Build ignore patterns
+	ignorePatterns := buildIgnorePatterns(config)
+
+	// Create temporary ignore file for noseyparker
+	var ignoreFile string
+	if len(ignorePatterns) > 0 {
+		tmpIgnore, err := os.CreateTemp("", "noseyparker-ignore-*")
+		if err != nil {
+			return fmt.Errorf("failed to create ignore file: %w", err)
+		}
+		ignoreFile = tmpIgnore.Name()
+		defer os.Remove(ignoreFile)
+
+		// Write all ignore patterns to the file
+		for _, pattern := range ignorePatterns {
+			if _, err := tmpIgnore.WriteString(pattern + "\n"); err != nil {
+				tmpIgnore.Close()
+				return fmt.Errorf("failed to write ignore patterns: %w", err)
+			}
+		}
+		tmpIgnore.Close()
+	}
+
+	// Build scan command
+	args := []string{"scan", "--datastore", datastore}
+	if ignoreFile != "" {
+		args = append(args, "--ignore", ignoreFile)
+	}
+	args = append(args, scanPath)
+
+	// Show exclusion info
+	if !config.NoExclusion {
+		fmt.Fprintf(os.Stderr, "[*] Using default exclusions (%d extensions, %d folders)\n",
+			len(defaultExcludedExtensions), len(defaultExcludedFolders))
+	} else {
+		fmt.Fprintln(os.Stderr, "[*] WARNING: Scanning all files (no exclusions enabled)")
+	}
+	if len(config.AdditionalExts) > 0 || len(config.AdditionalFolders) > 0 {
+		fmt.Fprintf(os.Stderr, "[*] Additional exclusions: %d extensions, %d folders\n",
+			len(config.AdditionalExts), len(config.AdditionalFolders))
+	}
+
+	// Report all excluded files
+	reportExclusions(scanPath, config)
+
+	// Run noseyparker scan
+	fmt.Fprintf(os.Stderr, "[*] Scanning %s...\n", scanPath)
+	scanCmd := exec.Command("noseyparker", args...)
+	scanCmd.Stderr = os.Stderr
+	if err := scanCmd.Run(); err != nil {
+		return fmt.Errorf("noseyparker scan failed: %w", err)
+	}
+
+	// Check for findings first
+	summaryCmd := exec.Command("noseyparker", "summarize", "--datastore", datastore)
+	summaryCmd.Stderr = os.Stderr
+	summaryOutput, err := summaryCmd.Output()
+	if err != nil {
+		// summarize might not exist in older versions, continue anyway
+		fmt.Fprintln(os.Stderr, "[*] Note: Could not get summary (may be using older noseyparker version)")
+	} else {
+		fmt.Fprintln(os.Stderr, string(summaryOutput))
+	}
+
+	// Run noseyparker report to stdout (and optionally to file)
+	reportCmd := exec.Command("noseyparker", "report", "--datastore", datastore)
+	reportCmd.Stderr = os.Stderr
+
+	// Set up output: tee to file if -o is specified
+	if config.OutputFile != "" {
+		outFile, err := os.Create(config.OutputFile)
+		if err != nil {
+			return fmt.Errorf("failed to create output file: %w", err)
+		}
+		defer outFile.Close()
+		reportCmd.Stdout = io.MultiWriter(os.Stdout, outFile)
+	} else {
+		reportCmd.Stdout = os.Stdout
+	}
+
+	if err := reportCmd.Run(); err != nil {
+		return fmt.Errorf("noseyparker report failed: %w", err)
+	}
+
+	if config.OutputFile != "" {
+		fmt.Fprintf(os.Stderr, "[+] Report saved to %s\n", config.OutputFile)
+	}
+
+	return nil
+}
+
+func cleanup(config Config) {
+	fmt.Fprintln(os.Stderr, "[*] Cleaning up...")
+
+	if runtime.GOOS == "windows" {
+		unmountSMBWindows(config)
+	} else {
+		// Linux and macOS both use umount
+		unmountSMBLinux(config)
+	}
+}
+
+func unmountSMBLinux(config Config) {
+	if config.MountPath == "" {
+		return
+	}
+
+	// Unmount
+	cmd := exec.Command("umount", config.MountPath)
+	cmd.Run() // Ignore errors during cleanup
+
+	// Remove the temporary directory
+	os.RemoveAll(config.MountPath)
+}
+
+func unmountSMBWindows(config Config) {
+	uncPath := fmt.Sprintf("\\\\%s\\%s", config.Host, config.Share)
+	cmd := exec.Command("net", "use", uncPath, "/delete", "/y")
+	cmd.Run() // Ignore errors during cleanup
+}
