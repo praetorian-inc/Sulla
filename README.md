@@ -18,7 +18,7 @@ make all
 
 # Build for a specific platform
 make linux
-make windows
+make windows # note: noseyparker does not yet have native support for Windows
 make mac
 ```
 
