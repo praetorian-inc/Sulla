@@ -1,5 +1,11 @@
 # SMBellum
 
+<p align="center">
+  <img width="600" alt="image" src="https://github.com/user-attachments/assets/a2efc303-7afa-41d6-b2e0-ad622298d436" />
+</p>
+
+***
+
 A command-line tool to mount SMB shares and scan them for secrets using [Noseyparker](https://github.com/praetorian-inc/noseyparker).
 
 ## Requirements
