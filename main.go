@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"io"
@@ -31,6 +32,20 @@ type Config struct {
 	OutputFile         string
 	Verbose            bool
 	UseDocker          bool
+	TargetsFile        string
+}
+
+// Target represents a single host/share combination to scan
+type Target struct {
+	Host  string
+	Share string
+}
+
+// ScanResult holds the outcome of scanning a single target
+type ScanResult struct {
+	Host  string
+	Share string
+	Error error
 }
 
 // Default file extensions to exclude (binaries, media, archives, etc.)
@@ -70,11 +85,34 @@ var defaultExcludedFolders = []string{
 func main() {
 	config := parseArgs()
 
-	// Validate required args
-	if config.Host == "" || config.Share == "" {
-		fmt.Fprintln(os.Stderr, "Error: host and share are required")
+	// Validate target selection: either --target-file OR (-h AND -s), but not both
+	hasTargetFile := config.TargetsFile != ""
+	hasHostShare := config.Host != "" && config.Share != ""
+	hasPartialHostShare := config.Host != "" || config.Share != ""
+
+	if hasTargetFile && hasPartialHostShare {
+		fmt.Fprintln(os.Stderr, "Error: Cannot use --target-file with -h/-s. Choose one input method.")
 		flag.Usage()
 		os.Exit(1)
+	}
+
+	if !hasTargetFile && !hasHostShare {
+		fmt.Fprintln(os.Stderr, "Error: Provide either --target-file <file> OR both -h <host> and -s <share>.")
+		flag.Usage()
+		os.Exit(1)
+	}
+
+	// Validate output directory for batch mode
+	if hasTargetFile && config.SaveOutput {
+		info, err := os.Stat(config.OutputFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: Output directory does not exist: %s\n", config.OutputFile)
+			os.Exit(1)
+		}
+		if !info.IsDir() {
+			fmt.Fprintf(os.Stderr, "Error: Output path must be a directory when using --target-file: %s\n", config.OutputFile)
+			os.Exit(1)
+		}
 	}
 
 	// Check if noseyparker is available (native or Docker)
@@ -92,44 +130,214 @@ func main() {
 		}
 	}
 
+	// Build target list
+	var targets []Target
+	if hasTargetFile {
+		var err error
+		targets, err = parseTargetFile(config.TargetsFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error parsing target file: %v\n", err)
+			os.Exit(1)
+		}
+		if len(targets) == 0 {
+			fmt.Fprintln(os.Stderr, "Error: No valid targets found in target file")
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "[*] Loaded %d targets from %s\n", len(targets), config.TargetsFile)
+	} else {
+		targets = []Target{{Host: config.Host, Share: config.Share}}
+	}
+
+	// Scan all targets, collecting results
+	var results []ScanResult
+	for i, target := range targets {
+		if hasTargetFile {
+			fmt.Fprintf(os.Stderr, "\n[*] === Target %d/%d: //%s/%s ===\n", i+1, len(targets), target.Host, target.Share)
+		}
+
+		// Create a copy of config for this target
+		targetConfig := config
+		targetConfig.Host = target.Host
+		targetConfig.Share = target.Share
+
+		// Set output file for batch mode
+		if hasTargetFile && config.SaveOutput {
+			targetConfig.OutputFile = filepath.Join(config.OutputFile,
+				fmt.Sprintf("%s_%s.txt", sanitizeFilename(target.Host), target.Share))
+		}
+
+		err := scanTarget(targetConfig)
+		results = append(results, ScanResult{
+			Host:  target.Host,
+			Share: target.Share,
+			Error: err,
+		})
+
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[-] Failed: //%s/%s - %v\n", target.Host, target.Share, err)
+		}
+	}
+
+	// Print summary for batch mode
+	if hasTargetFile {
+		printSummary(results)
+	}
+}
+
+// scanTarget performs the full scan workflow for a single host/share combination
+func scanTarget(config Config) error {
 	// Create temporary mount point
 	mountPath, err := createMountPoint()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating mount point: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to create mount point: %w", err)
 	}
 	config.MountPath = mountPath
 
 	// Setup signal handler for cleanup
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	cleanupDone := make(chan struct{})
 	go func() {
-		<-sigChan
-		fmt.Fprintln(os.Stderr, "\nReceived interrupt, cleaning up...")
-		cleanup(config)
-		os.Exit(1)
+		select {
+		case <-sigChan:
+			fmt.Fprintln(os.Stderr, "\nReceived interrupt, cleaning up...")
+			cleanup(config)
+			os.Exit(1)
+		case <-cleanupDone:
+			return
+		}
+	}()
+	defer func() {
+		signal.Stop(sigChan)
+		close(cleanupDone)
 	}()
 
 	// Mount the SMB share
 	fmt.Fprintf(os.Stderr, "[*] Mounting SMB share //%s/%s...\n", config.Host, config.Share)
 	if err := mountSMB(config); err != nil {
-		fmt.Fprintf(os.Stderr, "Error mounting SMB share: %v\n", err)
 		cleanup(config)
-		os.Exit(1)
+		return fmt.Errorf("mount failed: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "[+] Successfully mounted to %s\n", config.MountPath)
 
 	// Run noseyparker
 	fmt.Fprintln(os.Stderr, "[*] Running noseyparker scan...")
 	if err := runNoseyparker(config); err != nil {
-		fmt.Fprintf(os.Stderr, "Error running noseyparker: %v\n", err)
 		cleanup(config)
-		os.Exit(1)
+		return fmt.Errorf("scan failed: %w", err)
 	}
 
 	// Cleanup
 	cleanup(config)
 	fmt.Fprintln(os.Stderr, "[+] Scan complete")
+	return nil
+}
+
+// parseTargetFile reads targets from a file, supporting both CSV and UNC path formats
+func parseTargetFile(filename string) ([]Target, error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var targets []Target
+	scanner := bufio.NewScanner(file)
+	lineNum := 0
+
+	for scanner.Scan() {
+		lineNum++
+		line := strings.TrimSpace(scanner.Text())
+
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		host, share, err := parseTargetLine(line)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[!] Warning: Skipping invalid line %d: %s (%v)\n", lineNum, line, err)
+			continue
+		}
+
+		targets = append(targets, Target{Host: host, Share: share})
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	return targets, nil
+}
+
+// parseTargetLine parses a single line as either CSV (host,share) or UNC path (\\host\share)
+func parseTargetLine(line string) (host, share string, err error) {
+	// UNC path format: \\host\share or \\\\host\\share (escaped backslashes)
+	if strings.HasPrefix(line, "\\") {
+		// Normalize escaped backslashes (\\\\) to single backslashes (\\)
+		normalized := line
+		for strings.Contains(normalized, "\\\\") {
+			normalized = strings.ReplaceAll(normalized, "\\\\", "\\")
+		}
+
+		// Remove leading backslashes and split
+		trimmed := strings.TrimLeft(normalized, "\\")
+		parts := strings.SplitN(trimmed, "\\", 2)
+		if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+			return "", "", fmt.Errorf("invalid UNC path format")
+		}
+		return parts[0], parts[1], nil
+	}
+
+	// CSV format: host,share
+	parts := strings.SplitN(line, ",", 2)
+	if len(parts) == 2 {
+		host = strings.TrimSpace(parts[0])
+		share = strings.TrimSpace(parts[1])
+		if host == "" || share == "" {
+			return "", "", fmt.Errorf("empty host or share in CSV")
+		}
+		return host, share, nil
+	}
+
+	return "", "", fmt.Errorf("invalid format (expected 'host,share' or '\\\\host\\share')")
+}
+
+// sanitizeFilename replaces characters that are problematic in filenames
+func sanitizeFilename(s string) string {
+	// Replace dots and other problematic characters with underscores
+	s = strings.ReplaceAll(s, ".", "_")
+	s = strings.ReplaceAll(s, ":", "_")
+	s = strings.ReplaceAll(s, "/", "_")
+	s = strings.ReplaceAll(s, "\\", "_")
+	return s
+}
+
+// printSummary displays a summary of all scan results
+func printSummary(results []ScanResult) {
+	var successful, failed int
+	var failedTargets []ScanResult
+
+	for _, r := range results {
+		if r.Error == nil {
+			successful++
+		} else {
+			failed++
+			failedTargets = append(failedTargets, r)
+		}
+	}
+
+	fmt.Fprintln(os.Stderr, "\n=== Scan Summary ===")
+	fmt.Fprintf(os.Stderr, "Total targets: %d\n", len(results))
+	fmt.Fprintf(os.Stderr, "Successful:    %d\n", successful)
+	fmt.Fprintf(os.Stderr, "Failed:        %d\n", failed)
+
+	if len(failedTargets) > 0 {
+		fmt.Fprintln(os.Stderr, "\nFailed targets:")
+		for _, r := range failedTargets {
+			fmt.Fprintf(os.Stderr, "  - //%s/%s : %v\n", r.Host, r.Share, r.Error)
+		}
+	}
 }
 
 func parseArgs() Config {
@@ -140,10 +348,15 @@ func parseArgs() Config {
 	// Pre-process -o flag (supports optional argument) before flag.Parse()
 	config.SaveOutput, config.OutputFile, os.Args = extractOutputFlag(os.Args)
 
-	flag.StringVar(&config.Host, "host", "", "Target IP address or hostname (required)")
+	// Target selection (mutually exclusive: --target-file OR -h/-s)
+	flag.StringVar(&config.TargetsFile, "target-file", "", "File containing targets (CSV or UNC paths)")
+	flag.StringVar(&config.TargetsFile, "tf", "", "File containing targets (shorthand)")
+	flag.StringVar(&config.Host, "host", "", "Target IP address or hostname")
 	flag.StringVar(&config.Host, "h", "", "Target IP address or hostname (shorthand)")
-	flag.StringVar(&config.Share, "share", "", "SMB share name (required)")
+	flag.StringVar(&config.Share, "share", "", "SMB share name")
 	flag.StringVar(&config.Share, "s", "", "SMB share name (shorthand)")
+
+	// Authentication
 	flag.StringVar(&config.Username, "username", "", "Username for authentication (optional)")
 	flag.StringVar(&config.Username, "u", "", "Username for authentication (shorthand)")
 	flag.StringVar(&config.Password, "password", "", "Password for authentication (optional)")
@@ -162,9 +375,10 @@ func parseArgs() Config {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [options]\n\n", os.Args[0])
 		fmt.Fprintln(os.Stderr, "A tool to mount SMB shares and scan for secrets using Noseyparker")
-		fmt.Fprintln(os.Stderr, "\nRequired:")
-		fmt.Fprintln(os.Stderr, "  -host, -h           Target IP address or hostname")
-		fmt.Fprintln(os.Stderr, "  -share, -s          SMB share name")
+		fmt.Fprintln(os.Stderr, "\nTarget Selection (choose one):")
+		fmt.Fprintln(os.Stderr, "  --target-file, -tf  File with targets (CSV: host,share or UNC: \\\\host\\share)")
+		fmt.Fprintln(os.Stderr, "  -host, -h           Target IP address or hostname  }  Required together")
+		fmt.Fprintln(os.Stderr, "  -share, -s          SMB share name                  }  if not using -tf")
 		fmt.Fprintln(os.Stderr, "\nAuthentication:")
 		fmt.Fprintln(os.Stderr, "  -username, -u       Username for authentication")
 		fmt.Fprintln(os.Stderr, "  -password, -p       Password for authentication")
@@ -174,7 +388,8 @@ func parseArgs() Config {
 		fmt.Fprintln(os.Stderr, "  -exclude            Additional file extensions to exclude (comma-separated)")
 		fmt.Fprintln(os.Stderr, "  -exclude-folder     Additional folder names to exclude (comma-separated)")
 		fmt.Fprintln(os.Stderr, "\nOutput:")
-		fmt.Fprintln(os.Stderr, "  -o [filename]       Save report to file (default: <host>_<share>.txt)")
+		fmt.Fprintln(os.Stderr, "  -o <path>           Single target: output file (default: <host>_<share>.txt)")
+		fmt.Fprintln(os.Stderr, "                      Batch mode: output directory (must exist)")
 		fmt.Fprintln(os.Stderr, "  -v                  Verbose output (show excluded files)")
 		fmt.Fprintln(os.Stderr, "\nBuilt-in Exclusions (enabled by default):")
 		fmt.Fprintln(os.Stderr, "  File Extensions:")
@@ -182,14 +397,18 @@ func parseArgs() Config {
 		fmt.Fprintln(os.Stderr, "  Folders:")
 		fmt.Fprintf(os.Stderr, "    %s\n", strings.Join(defaultExcludedFolders, ", "))
 		fmt.Fprintln(os.Stderr, "\nExamples:")
-		fmt.Fprintln(os.Stderr, "  # Basic scan with default exclusions")
-		fmt.Fprintf(os.Stderr, "  %s -host 192.168.1.100 -share public\n\n", os.Args[0])
-		fmt.Fprintln(os.Stderr, "  # Scan everything (no exclusions)")
-		fmt.Fprintf(os.Stderr, "  %s -h 192.168.1.100 -s public -no-exclusion\n\n", os.Args[0])
-		fmt.Fprintln(os.Stderr, "  # With additional exclusions")
-		fmt.Fprintf(os.Stderr, "  %s -h 192.168.1.100 -s docs -exclude log,tmp -exclude-folder cache,backup\n\n", os.Args[0])
+		fmt.Fprintln(os.Stderr, "  # Single target scan")
+		fmt.Fprintf(os.Stderr, "  %s -h 192.168.1.100 -s public\n\n", os.Args[0])
+		fmt.Fprintln(os.Stderr, "  # Batch scan from target file")
+		fmt.Fprintf(os.Stderr, "  %s --target-file targets.txt -u admin -p secret123\n\n", os.Args[0])
+		fmt.Fprintln(os.Stderr, "  # Batch scan with output to directory")
+		fmt.Fprintf(os.Stderr, "  %s -tf targets.txt -o ./results/ -u admin -p secret123\n\n", os.Args[0])
 		fmt.Fprintln(os.Stderr, "  # With domain credentials")
-		fmt.Fprintf(os.Stderr, "  %s -h dc01.corp.local -s SYSVOL -u admin -p secret123 -d CORP\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -h dc01.corp.local -s SYSVOL -u admin -p secret123 -d CORP\n\n", os.Args[0])
+		fmt.Fprintln(os.Stderr, "Target file format (one per line):")
+		fmt.Fprintln(os.Stderr, "  192.168.1.10,share1       # CSV format")
+		fmt.Fprintln(os.Stderr, "  \\\\fileserver\\backup$      # UNC path")
+		fmt.Fprintln(os.Stderr, "  # Comments start with #")
 	}
 
 	flag.Parse()
@@ -211,8 +430,9 @@ func parseArgs() Config {
 		}
 	}
 
-	// Generate default output filename if -o was used without a filename
-	if config.SaveOutput && config.OutputFile == "" {
+	// Generate default output filename if -o was used without a filename (single target mode only)
+	// For batch mode, the OutputFile is treated as a directory and validated in main()
+	if config.SaveOutput && config.OutputFile == "" && config.TargetsFile == "" {
 		config.OutputFile = generateOutputFilename(config.Host, config.Share)
 	}
 
@@ -640,7 +860,7 @@ func runNoseyparkerScan(config Config, scanPath, datastorePath, datastore, ignor
 			args = append(args, "-v", fmt.Sprintf("%s:/ignore:ro", ignoreFile))
 		}
 
-		args = append(args, dockerImage, "scan", "--datastore", "/datastore/datastore")
+		args = append(args, dockerImage, "scan", "--datastore", "/datastore/datastore", "--progress", "always")
 		if ignoreFile != "" {
 			args = append(args, "--ignore", "/ignore")
 		}
@@ -649,7 +869,7 @@ func runNoseyparkerScan(config Config, scanPath, datastorePath, datastore, ignor
 		cmd = exec.Command("docker", args...)
 	} else {
 		// Native command
-		args := []string{"scan", "--datastore", datastore}
+		args := []string{"scan", "--datastore", datastore, "--progress", "always"}
 		if ignoreFile != "" {
 			args = append(args, "--ignore", ignoreFile)
 		}
