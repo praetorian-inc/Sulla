@@ -8,7 +8,7 @@ A command-line tool to mount SMB shares and scan them for secrets using [Noseypa
 
 ## Quick Installation
 
-Install NoseyParker if not already installed. To install via Docker:
+Install Noseyparker if not already installed. To install via Docker:
 
 ```bash
 docker pull ghcr.io/praetorian-inc/noseyparker:latest
@@ -46,7 +46,7 @@ SMBellum -h host.corp.tld -s HRData -u username -p password -d corp.tld -o custo
 | `-no-exclusion` | Disable all default exclusions |
 | `-exclude` | Additional file extensions to exclude (comma-separated) |
 | `-exclude-folder` | Additional folder names to exclude (comma-separated) |
-| `-o [filename]` | Save report output to provided file name. If no filename provided, will default to `{host}\_{share}.txt` |
+| `-o [filename]` | Save report output to provided file name. If no filename provided, will default to `{host}_{share}.txt` |
 | `-v` | Verbose output |
 
 ## Default Exclusions
@@ -64,4 +64,4 @@ Use `-no-exclusion` to scan everything, or add custom exclusions with `-exclude`
 - Mounting SMB shares may require `sudo` privileges
 - Shares are mounted read-only for safety
 - Automatically cleans up mounts on completion or interruption (Ctrl+C)
-- Running SMBellum from Windows is pending native Widnows support for NoseyParker [issue](https://github.com/praetorian-inc/noseyparker/issues/121)
+- Running SMBellum from Windows is pending native Windows support for Noseyparker [issue](https://github.com/praetorian-inc/noseyparker/issues/121)
