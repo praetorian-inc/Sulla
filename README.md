@@ -6,7 +6,9 @@
 
 ***
 
-A command-line tool to mount SMB shares and scan them for secrets using [Noseyparker](https://github.com/praetorian-inc/noseyparker).
+A command-line tool to scan SMB shares for sensitive data using [Noseyparker](https://github.com/praetorian-inc/noseyparker).
+
+Supports both anonymous and Active Directory authentication.
 
 ![demo](https://github.com/user-attachments/assets/1297a612-7724-4cfa-917d-4c0c09900407)
 
