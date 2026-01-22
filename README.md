@@ -8,6 +8,9 @@
 
 A command-line tool to mount SMB shares and scan them for secrets using [Noseyparker](https://github.com/praetorian-inc/noseyparker).
 
+![demo](https://github.com/user-attachments/assets/1297a612-7724-4cfa-917d-4c0c09900407)
+
+
 ## Requirements
 
 - [Noseyparker](https://github.com/praetorian-inc/noseyparker) must be installed
