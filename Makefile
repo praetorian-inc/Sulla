@@ -9,6 +9,8 @@ linux:
 	@echo "Built $(BINARY_NAME)-linux-amd64"
 	GOOS=linux GOARCH=386 go build -o $(BINARY_NAME)-linux-386 .
 	@echo "Built $(BINARY_NAME)-linux-386"
+	GOOS=linux GOARCH=arm64 go build -o $(BINARY_NAME)-linux-arm64 .
+	@echo "Built $(BINARY_NAME)-linux-arm64"
 
 windows:
 	GOOS=windows GOARCH=amd64 go build -o $(BINARY_NAME)-windows-amd64.exe .
@@ -23,7 +25,7 @@ mac:
 	@echo "Built $(BINARY_NAME)-darwin-arm64 (Apple Silicon)"
 
 clean:
-	rm -f $(BINARY_NAME)-linux-amd64 $(BINARY_NAME)-linux-386 \
+	rm -f $(BINARY_NAME)-linux-amd64 $(BINARY_NAME)-linux-386 $(BINARY_NAME)-linux-arm64 \
 		$(BINARY_NAME)-windows-amd64.exe $(BINARY_NAME)-windows-386.exe \
 		$(BINARY_NAME)-darwin-amd64 $(BINARY_NAME)-darwin-arm64 \
 		$(BINARY_NAME)
