@@ -87,6 +87,22 @@ smbellum -dc dc01.corp.local -u admin -p secret123 -d corp.local
 smbellum -dc dc01.corp.local -u admin -p secret123 -d corp.local -o results/ -of txt,json
 ```
 
+### Discovery-Only Mode
+
+Discover accessible shares without running Noseyparker scans. Outputs UNC paths that can be reviewed, filtered, and later used with `--target-file`:
+
+```bash
+# Discover reachable shares without secret scanning
+smbellum -dc dc01.corp.local -u admin -p secret123 -d corp.local -nn -o
+
+# Later, use discovered shares as target file input:
+smbellum -tf dc01_corp_local_discovered_smb_shares.txt -u admin -p secret123 -d corp.local
+```
+
+Useful when:
+- You need to review the full share list before scanning
+- You want to manually drop specific shares without using exclusion flags
+
 ### Batch Scanning from Target File
 
 Scan a predefined list of shares:
@@ -140,6 +156,7 @@ smbellum -h fileserver.corp.local -s SYSVOL -u admin -p secret123 -d corp.local
 | `--ldaps` | Use LDAPS (port 636) instead of LDAP (port 389) |
 | `--channel-binding` | Enable LDAP channel binding (requires `--ldaps`) |
 | `--dns-server`, `-dns` | Custom DNS server IP for hostname resolution |
+| `--no-noseyparker`, `-nn` | Discovery only: output shares in UNC format without scanning |
 
 ### Filtering
 

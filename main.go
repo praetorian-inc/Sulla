@@ -46,6 +46,7 @@ type Config struct {
 	UseLDAPS           bool   // Use LDAPS (port 636) instead of LDAP (port 389)
 	ChannelBinding     bool   // Enable LDAP channel binding (requires TLS)
 	DNSServer          string // Custom DNS server IP for lookups
+	NoNoseyparker      bool   // Discovery-only mode: output shares without scanning
 }
 
 // Target represents a single host/share combination to scan
@@ -103,17 +104,19 @@ var defaultExcludedShares = []string{
 func main() {
 	config := parseArgs()
 
-	// Check if noseyparker is available first (native or Docker)
-	if _, err := exec.LookPath("noseyparker"); err != nil {
-		if dockerAvailable() {
-			config.UseDocker = true
-			fmt.Fprintln(os.Stderr, "[*] noseyparker not in PATH, using Docker")
-		} else {
-			fmt.Fprintln(os.Stderr, "Error: noseyparker not found in PATH nor via Docker")
-			fmt.Fprintln(os.Stderr, "Install noseyparker: https://github.com/praetorian-inc/noseyparker")
-			fmt.Fprintln(os.Stderr, "To install via Docker, run:")
-			fmt.Fprintln(os.Stderr, "  docker pull ghcr.io/praetorian-inc/noseyparker:latest")
-			os.Exit(1)
+	// Check if noseyparker is available (skip in discovery-only mode)
+	if !config.NoNoseyparker {
+		if _, err := exec.LookPath("noseyparker"); err != nil {
+			if dockerAvailable() {
+				config.UseDocker = true
+				fmt.Fprintln(os.Stderr, "[*] noseyparker not in PATH, using Docker")
+			} else {
+				fmt.Fprintln(os.Stderr, "Error: noseyparker not found in PATH nor via Docker")
+				fmt.Fprintln(os.Stderr, "Install noseyparker: https://github.com/praetorian-inc/noseyparker")
+				fmt.Fprintln(os.Stderr, "To install via Docker, run:")
+				fmt.Fprintln(os.Stderr, "  docker pull ghcr.io/praetorian-inc/noseyparker:latest")
+				os.Exit(1)
+			}
 		}
 	}
 
@@ -157,6 +160,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Validate --no-noseyparker only works with --domain-controller
+	if config.NoNoseyparker && !hasDiscovery {
+		fmt.Fprintln(os.Stderr, "Error: --no-noseyparker/-nn requires --domain-controller/-dc mode.")
+		flag.Usage()
+		os.Exit(1)
+	}
+
+	// Warn if -of is used with -nn (it will be ignored)
+	if config.NoNoseyparker && len(config.OutputFormats) > 0 {
+		fmt.Fprintln(os.Stderr, "[!] Warning: --output-format/-of is ignored in discovery-only mode (-nn)")
+	}
+
 	// Validate/create output directory for batch mode
 	if isBatchMode && config.SaveOutput {
 		info, err := os.Stat(config.OutputFile)
@@ -184,6 +199,12 @@ func main() {
 		}
 		if len(targets) == 0 {
 			fmt.Fprintln(os.Stderr, "[*] No accessible shares discovered")
+			os.Exit(0)
+		}
+
+		// Discovery-only mode: output shares and exit
+		if config.NoNoseyparker {
+			outputDiscoveredShares(config, targets)
 			os.Exit(0)
 		}
 	} else if hasTargetFile {
@@ -389,6 +410,52 @@ func printSummary(results []ScanResult) {
 		for _, r := range failedTargets {
 			fmt.Fprintf(os.Stderr, "  - //%s/%s : %v\n", r.Host, r.Share, r.Error)
 		}
+	}
+}
+
+// outputDiscoveredShares outputs discovered shares in UNC format
+func outputDiscoveredShares(config Config, targets []Target) {
+	// Build output lines in UNC format
+	var lines []string
+	for _, t := range targets {
+		lines = append(lines, fmt.Sprintf("\\\\%s\\%s", t.Host, t.Share))
+	}
+	output := strings.Join(lines, "\n") + "\n"
+
+	// Determine output destination
+	if config.SaveOutput {
+		// Generate filename: {dc}_discovered_smb_shares.txt
+		filename := fmt.Sprintf("%s_discovered_smb_shares.txt", sanitizeFilename(config.DomainController))
+
+		// If OutputFile is a directory, write file into it
+		outputPath := config.OutputFile
+		if outputPath != "" {
+			info, err := os.Stat(outputPath)
+			if (err == nil && info.IsDir()) || strings.HasSuffix(outputPath, "/") || strings.HasSuffix(outputPath, string(os.PathSeparator)) {
+				// It's a directory (or intended to be), join with filename
+				if err != nil {
+					// Directory doesn't exist, create it
+					if err := os.MkdirAll(outputPath, 0755); err != nil {
+						fmt.Fprintf(os.Stderr, "Error: Failed to create output directory: %s\n", err)
+						os.Exit(1)
+					}
+				}
+				outputPath = filepath.Join(outputPath, filename)
+			}
+			// else: use outputPath as-is (user specified a filename)
+		} else {
+			// -o with no argument: use default filename in current directory
+			outputPath = filename
+		}
+
+		if err := os.WriteFile(outputPath, []byte(output), 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: Failed to write output file: %s\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "[+] Discovered shares written to %s\n", outputPath)
+	} else {
+		// Output to stdout
+		fmt.Print(output)
 	}
 }
 
@@ -726,6 +793,8 @@ func parseArgs() Config {
 	flag.BoolVar(&config.ChannelBinding, "channel-binding", false, "Enable LDAP channel binding (requires --ldaps)")
 	flag.StringVar(&config.DNSServer, "dns-server", "", "Custom DNS server IP for hostname resolution")
 	flag.StringVar(&config.DNSServer, "dns", "", "Custom DNS server IP (shorthand)")
+	flag.BoolVar(&config.NoNoseyparker, "no-noseyparker", false, "Discovery only: output shares in UNC format without scanning")
+	flag.BoolVar(&config.NoNoseyparker, "nn", false, "Discovery only: output shares in UNC format without scanning (shorthand)")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [options]\n\n", os.Args[0])
@@ -743,6 +812,7 @@ func parseArgs() Config {
 		fmt.Fprintln(os.Stderr, "  --ldaps             Use LDAPS (port 636) instead of LDAP (port 389)")
 		fmt.Fprintln(os.Stderr, "  --channel-binding   Enable LDAP channel binding (requires --ldaps)")
 		fmt.Fprintln(os.Stderr, "  --dns-server, -dns  Custom DNS server IP for hostname resolution")
+		fmt.Fprintln(os.Stderr, "  --no-noseyparker, -nn  Discovery only: output shares in UNC format, skip scanning")
 		fmt.Fprintln(os.Stderr, "\nFiltering (supports regex patterns):")
 		fmt.Fprintln(os.Stderr, "  --show-default-exclusions             Show all default exclusions and exit")
 		fmt.Fprintln(os.Stderr, "  --no-default-exclusions       Disable all default exclusions (scan everything)")
@@ -767,6 +837,10 @@ func parseArgs() Config {
 		fmt.Fprintf(os.Stderr, "  %s -dc dc01.corp.local -u admin -p secret123 -d corp.local\n\n", os.Args[0])
 		fmt.Fprintln(os.Stderr, "  # Discovery with output to directory")
 		fmt.Fprintf(os.Stderr, "  %s -dc dc01.corp.local -u admin -p secret123 -d corp.local -o ./results/\n\n", os.Args[0])
+		fmt.Fprintln(os.Stderr, "  # Discovery only (no scanning), output UNC paths to stdout")
+		fmt.Fprintf(os.Stderr, "  %s -dc dc01.corp.local -u admin -p secret123 -d corp.local -nn\n\n", os.Args[0])
+		fmt.Fprintln(os.Stderr, "  # Discovery only, save to file")
+		fmt.Fprintf(os.Stderr, "  %s -dc dc01.corp.local -u admin -p secret123 -d corp.local -nn -o ./\n\n", os.Args[0])
 		fmt.Fprintln(os.Stderr, "  # Single target scan")
 		fmt.Fprintf(os.Stderr, "  %s -h 192.168.1.100 -s public\n\n", os.Args[0])
 		fmt.Fprintln(os.Stderr, "  # Batch scan from target file")
@@ -774,7 +848,6 @@ func parseArgs() Config {
 		fmt.Fprintln(os.Stderr, "Target file format (one per line):")
 		fmt.Fprintln(os.Stderr, "  192.168.1.10,share1       # CSV format")
 		fmt.Fprintln(os.Stderr, "  \\\\fileserver\\backup$      # UNC path")
-		fmt.Fprintln(os.Stderr, "  # Comments start with #")
 	}
 
 	flag.Parse()
@@ -844,8 +917,31 @@ func parseArgs() Config {
 
 	// Generate default output filename if -o was used without a filename (single target mode only)
 	// For batch mode, the OutputFile is treated as a directory and validated in main()
-	if config.SaveOutput && config.OutputFile == "" && config.TargetsFile == "" {
-		config.OutputFile = generateOutputFilename(config.Host, config.Share)
+	if config.SaveOutput && config.TargetsFile == "" && config.DomainController == "" {
+		if config.OutputFile == "" {
+			// -o with no argument: use default filename
+			config.OutputFile = generateOutputFilename(config.Host, config.Share)
+		} else {
+			// Check if OutputFile is a directory (ends with / or is an existing directory)
+			isDir := strings.HasSuffix(config.OutputFile, "/") || strings.HasSuffix(config.OutputFile, string(os.PathSeparator))
+			if !isDir {
+				if info, err := os.Stat(config.OutputFile); err == nil && info.IsDir() {
+					isDir = true
+				}
+			}
+			if isDir {
+				// Create directory if it doesn't exist
+				if _, err := os.Stat(config.OutputFile); os.IsNotExist(err) {
+					if err := os.MkdirAll(config.OutputFile, 0755); err != nil {
+						fmt.Fprintf(os.Stderr, "Error: Failed to create output directory: %s\n", err)
+						os.Exit(1)
+					}
+					fmt.Fprintf(os.Stderr, "[*] Created output directory: %s\n", config.OutputFile)
+				}
+				// Append default filename to directory
+				config.OutputFile = filepath.Join(config.OutputFile, generateOutputFilename(config.Host, config.Share))
+			}
+		}
 	}
 
 	return config
