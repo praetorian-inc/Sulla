@@ -157,14 +157,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Validate output directory for batch mode
+	// Validate/create output directory for batch mode
 	if isBatchMode && config.SaveOutput {
 		info, err := os.Stat(config.OutputFile)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: Output directory does not exist: %s\n", config.OutputFile)
-			os.Exit(1)
-		}
-		if !info.IsDir() {
+			// Directory doesn't exist, create it
+			if err := os.MkdirAll(config.OutputFile, 0755); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: Failed to create output directory: %s\n", err)
+				os.Exit(1)
+			}
+			fmt.Fprintf(os.Stderr, "[*] Created output directory: %s\n", config.OutputFile)
+		} else if !info.IsDir() {
 			fmt.Fprintf(os.Stderr, "Error: Output path must be a directory in batch mode: %s\n", config.OutputFile)
 			os.Exit(1)
 		}
