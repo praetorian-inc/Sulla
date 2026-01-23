@@ -95,7 +95,7 @@ smbellum -h fileserver.corp.local -s SYSVOL -u admin -p secret123 -d corp.local
 | `--domain-controller`, `-dc` | Domain controller for AD share discovery |
 | `--target-file`, `-tf` | File containing targets (CSV or UNC paths) |
 | `--host`, `-h` | Target IP address or hostname |
-| `--share`, `-s` | SMB share name (required with `-h`) |
+| `--share`, `-s` | SMB share name (required with `--host`) |
 
 ### Authentication
 
@@ -103,7 +103,7 @@ smbellum -h fileserver.corp.local -s SYSVOL -u admin -p secret123 -d corp.local
 |------|-------------|
 | `--username`, `-u` | Username for authentication (required for `-dc`) |
 | `--password`, `-p` | Password for authentication (required for `-dc`) |
-| `--domain`, `-d` | Domain for authentication (required for `-dc`, e.g., corp.local) |
+| `--domain`, `-d` | Domain for authentication (required for `-dc`) |
 
 ### Discovery Options
 
@@ -142,7 +142,7 @@ SMBellum skips scanning files, folders, and shares that are unlikely to contain 
 - exe, dll, so, zip, tar, gz, jpg, png, mp3, mp4, pdf, docx, xlsx, pptx, and more
 
 **Directories:**
-- Program Files, Windows, System32, node_modules, .git, __pycache__, vendor, and more
+- Program Files, Windows, System32, node_modules, .git, \_\_pycache\_\_, vendor, and more
 
 Use `--show-default-exclusions` to see the complete list, or `--no-default-exclusions` to scan everything.
 
@@ -161,6 +161,6 @@ Use `--show-default-exclusions` to see the complete list, or `--no-default-exclu
 - Mounting SMB shares may require `sudo` privileges
 - Shares are mounted read-only for safety
 - Automatically cleans up mounts on completion or interruption (Ctrl+C)
-- Discovery mode filters out disabled AD accounts and machines inactive for >4 months, ala [Snaffler](https://github.com/SnaffCon/Snaffler)
+- Discovery mode filters out disabled AD accounts and machines inactive for >4 months, a la [Snaffler](https://github.com/SnaffCon/Snaffler)
 - Discovery uses 10 parallel workers for efficient share enumeration
-- If noseyparker is not in PATH, SMBellum will automatically use Docker if available
+- If Noseyparker is not in PATH, SMBellum will automatically use Docker if available
