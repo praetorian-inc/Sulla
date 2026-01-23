@@ -36,7 +36,14 @@ Install Noseyparker if not already installed. To install via Docker:
 docker pull ghcr.io/praetorian-inc/noseyparker:latest
 ```
 
-Next, download the appropriate SMBellum binary for your platform from [Releases](https://github.com/praetorian-inc/SMBellum/releases).
+Next, download the appropriate SMBellum binary for your platform from [Releases](https://github.com/praetorian-inc/SMBellum/releases):
+```bash
+# Linux x86_64
+wget -O smbellum https://github.com/praetorian-inc/SMBellum/releases/latest/download/smbellum-linux-amd64
+
+# Linux ARM64
+wget -O smbellum https://github.com/praetorian-inc/SMBellum/releases/latest/download/smbellum-linux-arm64
+```
 
 ## Usage
 
