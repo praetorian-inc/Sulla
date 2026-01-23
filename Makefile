@@ -1,6 +1,6 @@
 .PHONY: all clean linux windows mac
 
-BINARY_NAME=SMBellum
+BINARY_NAME=smbellum
 
 all: linux windows mac
 

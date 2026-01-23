@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"io"
@@ -10,10 +12,15 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
+
+	"github.com/go-ldap/ldap/v3"
+	"github.com/hirochachacha/go-smb2"
 )
 
 const dockerImage = "ghcr.io/praetorian-inc/noseyparker:latest"
@@ -28,11 +35,17 @@ type Config struct {
 	NoExclusion        bool
 	AdditionalExts     []string
 	AdditionalFolders  []string
+	ExcludedShares     []string
 	SaveOutput         bool
 	OutputFile         string
+	OutputFormats      []string // Output formats: txt, json, jsonl, sarif
 	Verbose            bool
 	UseDocker          bool
 	TargetsFile        string
+	DomainController   string
+	UseLDAPS           bool   // Use LDAPS (port 636) instead of LDAP (port 389)
+	ChannelBinding     bool   // Enable LDAP channel binding (requires TLS)
+	DNSServer          string // Custom DNS server IP for lookups
 }
 
 // Target represents a single host/share combination to scan
@@ -82,42 +95,16 @@ var defaultExcludedFolders = []string{
 	"node_modules", ".git", "__pycache__", "vendor",
 }
 
+// Default shares to exclude during discovery (regex patterns)
+var defaultExcludedShares = []string{
+	`^IPC\$$`, `^print\$$`, `^ADMIN\$$`,
+}
+
 func main() {
 	config := parseArgs()
 
-	// Validate target selection: either --target-file OR (-h AND -s), but not both
-	hasTargetFile := config.TargetsFile != ""
-	hasHostShare := config.Host != "" && config.Share != ""
-	hasPartialHostShare := config.Host != "" || config.Share != ""
-
-	if hasTargetFile && hasPartialHostShare {
-		fmt.Fprintln(os.Stderr, "Error: Cannot use --target-file with -h/-s. Choose one input method.")
-		flag.Usage()
-		os.Exit(1)
-	}
-
-	if !hasTargetFile && !hasHostShare {
-		fmt.Fprintln(os.Stderr, "Error: Provide either --target-file <file> OR both -h <host> and -s <share>.")
-		flag.Usage()
-		os.Exit(1)
-	}
-
-	// Validate output directory for batch mode
-	if hasTargetFile && config.SaveOutput {
-		info, err := os.Stat(config.OutputFile)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: Output directory does not exist: %s\n", config.OutputFile)
-			os.Exit(1)
-		}
-		if !info.IsDir() {
-			fmt.Fprintf(os.Stderr, "Error: Output path must be a directory when using --target-file: %s\n", config.OutputFile)
-			os.Exit(1)
-		}
-	}
-
-	// Check if noseyparker is available (native or Docker)
+	// Check if noseyparker is available first (native or Docker)
 	if _, err := exec.LookPath("noseyparker"); err != nil {
-		// Native not found, try Docker
 		if dockerAvailable() {
 			config.UseDocker = true
 			fmt.Fprintln(os.Stderr, "[*] noseyparker not in PATH, using Docker")
@@ -130,9 +117,73 @@ func main() {
 		}
 	}
 
+	// Validate target selection: --dc OR --target-file OR (-h AND -s), mutually exclusive
+	hasDiscovery := config.DomainController != ""
+	hasTargetFile := config.TargetsFile != ""
+	hasHostShare := config.Host != "" && config.Share != ""
+	hasPartialHostShare := config.Host != "" || config.Share != ""
+	isBatchMode := hasDiscovery || hasTargetFile
+
+	// Check mutual exclusivity
+	if hasDiscovery && hasTargetFile {
+		fmt.Fprintln(os.Stderr, "Error: Cannot use --domain-controller with --target-file. Choose one input method.")
+		flag.Usage()
+		os.Exit(1)
+	}
+	if hasDiscovery && hasPartialHostShare {
+		fmt.Fprintln(os.Stderr, "Error: Cannot use --domain-controller with -h/-s. Choose one input method.")
+		flag.Usage()
+		os.Exit(1)
+	}
+	if hasTargetFile && hasPartialHostShare {
+		fmt.Fprintln(os.Stderr, "Error: Cannot use --target-file with -h/-s. Choose one input method.")
+		flag.Usage()
+		os.Exit(1)
+	}
+
+	// Validate discovery mode requirements
+	if hasDiscovery {
+		if config.Username == "" || config.Password == "" || config.Domain == "" {
+			fmt.Fprintln(os.Stderr, "Error: --domain-controller requires -u <username>, -p <password>, and -d <domain>.")
+			flag.Usage()
+			os.Exit(1)
+		}
+	}
+
+	// Validate that at least one input method is provided
+	if !hasDiscovery && !hasTargetFile && !hasHostShare {
+		fmt.Fprintln(os.Stderr, "Error: Provide --domain-controller, --target-file <file>, OR both -h <host> and -s <share>.")
+		flag.Usage()
+		os.Exit(1)
+	}
+
+	// Validate output directory for batch mode
+	if isBatchMode && config.SaveOutput {
+		info, err := os.Stat(config.OutputFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: Output directory does not exist: %s\n", config.OutputFile)
+			os.Exit(1)
+		}
+		if !info.IsDir() {
+			fmt.Fprintf(os.Stderr, "Error: Output path must be a directory in batch mode: %s\n", config.OutputFile)
+			os.Exit(1)
+		}
+	}
+
 	// Build target list
 	var targets []Target
-	if hasTargetFile {
+	if hasDiscovery {
+		var err error
+		targets, err = discoverTargets(config)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error during discovery: %v\n", err)
+			os.Exit(1)
+		}
+		if len(targets) == 0 {
+			fmt.Fprintln(os.Stderr, "[*] No accessible shares discovered")
+			os.Exit(0)
+		}
+	} else if hasTargetFile {
 		var err error
 		targets, err = parseTargetFile(config.TargetsFile)
 		if err != nil {
@@ -151,7 +202,7 @@ func main() {
 	// Scan all targets, collecting results
 	var results []ScanResult
 	for i, target := range targets {
-		if hasTargetFile {
+		if isBatchMode {
 			fmt.Fprintf(os.Stderr, "\n[*] === Target %d/%d: //%s/%s ===\n", i+1, len(targets), target.Host, target.Share)
 		}
 
@@ -161,9 +212,9 @@ func main() {
 		targetConfig.Share = target.Share
 
 		// Set output file for batch mode
-		if hasTargetFile && config.SaveOutput {
+		if isBatchMode && config.SaveOutput {
 			targetConfig.OutputFile = filepath.Join(config.OutputFile,
-				fmt.Sprintf("%s_%s.txt", sanitizeFilename(target.Host), target.Share))
+				fmt.Sprintf("%s_%s.txt", sanitizeFilename(target.Host), sanitizeFilename(target.Share)))
 		}
 
 		err := scanTarget(targetConfig)
@@ -179,7 +230,7 @@ func main() {
 	}
 
 	// Print summary for batch mode
-	if hasTargetFile {
+	if isBatchMode {
 		printSummary(results)
 	}
 }
@@ -213,13 +264,10 @@ func scanTarget(config Config) error {
 	}()
 
 	// Mount the SMB share
-	fmt.Fprintf(os.Stderr, "[*] Mounting SMB share //%s/%s...\n", config.Host, config.Share)
 	if err := mountSMB(config); err != nil {
 		cleanup(config)
 		return fmt.Errorf("mount failed: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "[+] Successfully mounted to %s\n", config.MountPath)
-
 	// Run noseyparker
 	fmt.Fprintln(os.Stderr, "[*] Running noseyparker scan...")
 	if err := runNoseyparker(config); err != nil {
@@ -310,6 +358,7 @@ func sanitizeFilename(s string) string {
 	s = strings.ReplaceAll(s, ":", "_")
 	s = strings.ReplaceAll(s, "/", "_")
 	s = strings.ReplaceAll(s, "\\", "_")
+	s = strings.ReplaceAll(s, " ", "_")
 	return s
 }
 
@@ -329,7 +378,7 @@ func printSummary(results []ScanResult) {
 
 	fmt.Fprintln(os.Stderr, "\n=== Scan Summary ===")
 	fmt.Fprintf(os.Stderr, "Total targets: %d\n", len(results))
-	fmt.Fprintf(os.Stderr, "Successful:    %d\n", successful)
+	fmt.Fprintf(os.Stderr, "Scanned:       %d\n", successful)
 	fmt.Fprintf(os.Stderr, "Failed:        %d\n", failed)
 
 	if len(failedTargets) > 0 {
@@ -340,15 +389,303 @@ func printSummary(results []ScanResult) {
 	}
 }
 
+// domainToBaseDN converts a domain name to LDAP base DN
+// e.g., "corp.local" -> "DC=corp,DC=local"
+func domainToBaseDN(domain string) string {
+	parts := strings.Split(domain, ".")
+	var dnParts []string
+	for _, part := range parts {
+		dnParts = append(dnParts, "DC="+part)
+	}
+	return strings.Join(dnParts, ",")
+}
+
+// discoverTargets orchestrates host and share discovery with parallel workers
+func discoverTargets(config Config) ([]Target, error) {
+	// Step 1: Discover computers from AD
+	fmt.Fprintf(os.Stderr, "[*] Querying AD for computer objects from %s...\n", config.DomainController)
+	computers, err := discoverComputers(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to discover computers: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "[+] Found %d computers in AD\n", len(computers))
+
+	if len(computers) == 0 {
+		return nil, nil
+	}
+
+	// Step 2: Discover shares on each computer (parallel with 10 workers)
+	fmt.Fprintln(os.Stderr, "[*] Identifying shares on discovered hosts (this could take a while)...")
+
+	type hostShares struct {
+		host   string
+		shares []string
+		err    error
+	}
+
+	jobs := make(chan string, len(computers))
+	results := make(chan hostShares, len(computers))
+
+	// Start workers
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for host := range jobs {
+				shares, err := discoverSharesOnHost(host, config)
+				results <- hostShares{host: host, shares: shares, err: err}
+			}
+		}()
+	}
+
+	// Send jobs
+	for _, computer := range computers {
+		jobs <- computer
+	}
+	close(jobs)
+
+	// Wait for workers and close results
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Collect results
+	var targets []Target
+	var hostsWithShares, totalShares, failedHosts int
+	for result := range results {
+		if result.err != nil {
+			failedHosts++
+			if config.Verbose {
+				fmt.Fprintf(os.Stderr, "[!] %s: %v\n", result.host, result.err)
+			}
+			continue
+		}
+		if len(result.shares) > 0 {
+			hostsWithShares++
+			for _, share := range result.shares {
+				totalShares++
+				targets = append(targets, Target{Host: result.host, Share: share})
+				fmt.Fprintf(os.Stderr, "[+] Found \\\\%s\\%s\n", result.host, share)
+			}
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "[+] Found %d accessible shares on %d hosts\n", totalShares, hostsWithShares)
+	if failedHosts > 0 && !config.Verbose {
+		fmt.Fprintf(os.Stderr, "[*] %d hosts unreachable (use -v for details)\n", failedHosts)
+	}
+	return targets, nil
+}
+
+// connectLDAPWithTLS establishes an LDAPS connection
+func connectLDAPWithTLS(config Config) (*ldap.Conn, error) {
+	// TLS config - accept self-signed certs (pentesting tool)
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: true,
+		ServerName:         config.DomainController,
+	}
+
+	// Connect to LDAPS (port 636)
+	ldapsURL := fmt.Sprintf("ldaps://%s:636", config.DomainController)
+	l, err := ldap.DialURL(ldapsURL, ldap.DialWithTLSConfig(tlsConfig))
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to DC via LDAPS: %w", err)
+	}
+
+	return l, nil
+}
+
+// discoverComputers queries AD via LDAP for all computer objects
+func discoverComputers(config Config) ([]string, error) {
+	var l *ldap.Conn
+	var err error
+
+	if config.UseLDAPS {
+		l, err = connectLDAPWithTLS(config)
+		if err != nil {
+			return nil, err
+		}
+		defer l.Close()
+
+		if config.ChannelBinding {
+			// Use NTLM authentication over LDAPS
+			// NTLM over TLS provides protection against credential forwarding attacks
+			// The go-ldap library's NTLMBind uses go-ntlmssp which negotiates NTLMv2
+			err = l.NTLMBind(config.Domain, config.Username, config.Password)
+			if err != nil {
+				return nil, fmt.Errorf("NTLM bind over LDAPS failed: %w", err)
+			}
+			fmt.Fprintln(os.Stderr, "[+] LDAPS connection with NTLM authentication established")
+		} else {
+			// Simple bind over LDAPS
+			bindUser := fmt.Sprintf("%s@%s", config.Username, config.Domain)
+			err = l.Bind(bindUser, config.Password)
+			if err != nil {
+				return nil, fmt.Errorf("LDAP bind failed: %w", err)
+			}
+			fmt.Fprintln(os.Stderr, "[+] LDAPS connection established")
+		}
+	} else {
+		// Plain LDAP (port 389)
+		l, err = ldap.DialURL(fmt.Sprintf("ldap://%s:389", config.DomainController))
+		if err != nil {
+			return nil, fmt.Errorf("failed to connect to DC: %w", err)
+		}
+		defer l.Close()
+
+		// Bind with credentials (UPN format: user@domain works best with FQDN domains)
+		bindUser := fmt.Sprintf("%s@%s", config.Username, config.Domain)
+		err = l.Bind(bindUser, config.Password)
+		if err != nil {
+			return nil, fmt.Errorf("LDAP bind failed: %w", err)
+		}
+	}
+
+	// Search for computer objects using paged search to handle large domains
+	// AD has a default limit of 1000 results per query
+	baseDN := domainToBaseDN(config.Domain)
+
+	// Calculate timestamp for 4 months ago in Windows FILETIME format
+	// FILETIME is 100-nanosecond intervals since January 1, 1601
+	// Unix epoch (Jan 1, 1970) = 116444736000000000 in FILETIME
+	const unixEpochDiff = 116444736000000000
+	fourMonthsAgo := time.Now().AddDate(0, -4, 0)
+	fileTime := (fourMonthsAgo.Unix() * 10000000) + unixEpochDiff
+
+	// Build LDAP filter:
+	// - objectClass=computer: only computer accounts
+	// - !(userAccountControl:1.2.840.113556.1.4.803:=2): exclude disabled accounts (bit 2 = ACCOUNTDISABLE)
+	// - lastLogonTimestamp>=X: only machines that logged in within last 4 months
+	ldapFilter := fmt.Sprintf("(&(objectClass=computer)(!(userAccountControl:1.2.840.113556.1.4.803:=2))(lastLogonTimestamp>=%d))", fileTime)
+
+	searchRequest := ldap.NewSearchRequest(
+		baseDN,
+		ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
+		ldapFilter,
+		[]string{"dNSHostName"},
+		nil,
+	)
+
+	// Use paged search with 500 entries per page to avoid size limit errors
+	sr, err := l.SearchWithPaging(searchRequest, 500)
+	if err != nil {
+		return nil, fmt.Errorf("LDAP search failed: %w", err)
+	}
+
+	var computers []string
+	for _, entry := range sr.Entries {
+		dnsHostName := entry.GetAttributeValue("dNSHostName")
+		if dnsHostName != "" {
+			computers = append(computers, dnsHostName)
+		}
+	}
+
+	return computers, nil
+}
+
+// discoverSharesOnHost enumerates SMB shares on a host and returns those with read access
+func discoverSharesOnHost(host string, config Config) ([]string, error) {
+	// Resolve hostname to IP using custom resolver if configured
+	resolver := getResolver(config.DNSServer)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ips, err := resolver.LookupHost(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("DNS resolution failed: %w", err)
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("no IP addresses found")
+	}
+
+	// Connect to SMB
+	conn, err := net.DialTimeout("tcp", ips[0]+":445", 5*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("connection failed: %w", err)
+	}
+	defer conn.Close()
+
+	// Create SMB dialer
+	d := &smb2.Dialer{
+		Initiator: &smb2.NTLMInitiator{
+			User:     config.Username,
+			Password: config.Password,
+			Domain:   config.Domain,
+		},
+	}
+
+	s, err := d.Dial(conn)
+	if err != nil {
+		return nil, fmt.Errorf("SMB dial failed: %w", err)
+	}
+	defer s.Logoff()
+
+	// List shares
+	shareNames, err := s.ListSharenames()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list shares: %w", err)
+	}
+
+	// Check read access for each share (skip excluded shares)
+	var accessibleShares []string
+	for _, shareName := range shareNames {
+		if isShareExcluded(shareName, config.ExcludedShares) {
+			continue
+		}
+		if checkShareAccess(s, shareName) {
+			accessibleShares = append(accessibleShares, shareName)
+		}
+	}
+
+	return accessibleShares, nil
+}
+
+// isShareExcluded checks if a share name should be excluded (supports regex patterns)
+func isShareExcluded(shareName string, excludedShares []string) bool {
+	for _, pattern := range excludedShares {
+		re, err := regexp.Compile("(?i)" + pattern) // case-insensitive
+		if err != nil {
+			// If invalid regex, fall back to literal match
+			if strings.EqualFold(shareName, pattern) {
+				return true
+			}
+			continue
+		}
+		if re.MatchString(shareName) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkShareAccess verifies read access to a share by attempting to list its root directory
+func checkShareAccess(session *smb2.Session, shareName string) bool {
+	share, err := session.Mount(shareName)
+	if err != nil {
+		return false
+	}
+	defer share.Umount()
+
+	// Try to read root directory
+	_, err = share.ReadDir(".")
+	return err == nil
+}
+
 func parseArgs() Config {
 	var config Config
 	var additionalExts string
 	var additionalFolders string
+	var excludedShares string
+	var outputFormats string
 
 	// Pre-process -o flag (supports optional argument) before flag.Parse()
 	config.SaveOutput, config.OutputFile, os.Args = extractOutputFlag(os.Args)
 
-	// Target selection (mutually exclusive: --target-file OR -h/-s)
+	// Target selection (mutually exclusive: --domain-controller OR --target-file OR -h/-s)
+	flag.StringVar(&config.DomainController, "domain-controller", "", "Domain controller for AD share discovery")
+	flag.StringVar(&config.DomainController, "dc", "", "Domain controller for AD share discovery (shorthand)")
 	flag.StringVar(&config.TargetsFile, "target-file", "", "File containing targets (CSV or UNC paths)")
 	flag.StringVar(&config.TargetsFile, "tf", "", "File containing targets (shorthand)")
 	flag.StringVar(&config.Host, "host", "", "Target IP address or hostname")
@@ -365,46 +702,72 @@ func parseArgs() Config {
 	flag.StringVar(&config.Domain, "d", "", "Domain for authentication (shorthand)")
 
 	// Exclusion options
-	flag.BoolVar(&config.NoExclusion, "no-exclusion", false, "Disable all default exclusions (scan all files/folders)")
-	flag.StringVar(&additionalExts, "exclude", "", "Additional file extensions to exclude (comma-separated, e.g., 'log,tmp,bak')")
-	flag.StringVar(&additionalFolders, "exclude-folder", "", "Additional folder names to exclude (comma-separated, e.g., 'temp,cache')")
+	var showDefaultExclusions bool
+	flag.BoolVar(&config.NoExclusion, "no-default-exclusions", false, "Disable all default exclusions (scan all files/folders)")
+	flag.BoolVar(&showDefaultExclusions, "show-default-exclusions", false, "Show all default exclusions and exit")
+	flag.StringVar(&additionalExts, "exclude-extensions", "", "Additional file extensions to exclude (comma-separated)")
+	flag.StringVar(&additionalExts, "xe", "", "Additional file extensions to exclude (shorthand)")
+	flag.StringVar(&additionalFolders, "exclude-directories", "", "Additional directories to exclude (comma-separated)")
+	flag.StringVar(&additionalFolders, "xd", "", "Additional directories to exclude (shorthand)")
+	flag.StringVar(&excludedShares, "exclude-shares", "", "Share names to exclude during discovery (comma-separated)")
+	flag.StringVar(&excludedShares, "xs", "", "Share names to exclude during discovery (shorthand)")
 
 	// Output options (note: -o is handled manually after flag.Parse for optional argument support)
-	flag.BoolVar(&config.Verbose, "v", false, "Verbose output (show excluded files)")
+	flag.StringVar(&outputFormats, "output-format", "", "Output formats to save (comma-separated: txt,json,jsonl,sarif)")
+	flag.StringVar(&outputFormats, "of", "", "Output formats to save (shorthand)")
+	flag.BoolVar(&config.Verbose, "verbose", false, "Verbose output (show excluded files)")
+	flag.BoolVar(&config.Verbose, "v", false, "Verbose output (shorthand)")
+
+	// Discovery options (LDAPS and channel binding)
+	flag.BoolVar(&config.UseLDAPS, "ldaps", false, "Use LDAPS (port 636) instead of LDAP (port 389)")
+	flag.BoolVar(&config.ChannelBinding, "channel-binding", false, "Enable LDAP channel binding (requires --ldaps)")
+	flag.StringVar(&config.DNSServer, "dns-server", "", "Custom DNS server IP for hostname resolution")
+	flag.StringVar(&config.DNSServer, "dns", "", "Custom DNS server IP (shorthand)")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [options]\n\n", os.Args[0])
 		fmt.Fprintln(os.Stderr, "A tool to mount SMB shares and scan for secrets using Noseyparker")
 		fmt.Fprintln(os.Stderr, "\nTarget Selection (choose one):")
-		fmt.Fprintln(os.Stderr, "  --target-file, -tf  File with targets (CSV: host,share or UNC: \\\\host\\share)")
-		fmt.Fprintln(os.Stderr, "  -host, -h           Target IP address or hostname  }  Required together")
-		fmt.Fprintln(os.Stderr, "  -share, -s          SMB share name                  }  if not using -tf")
+		fmt.Fprintln(os.Stderr, "  --domain-controller, -dc  Discover and scan all accessible AD shares")
+		fmt.Fprintln(os.Stderr, "  --target-file, -tf        File with targets (CSV: host,share or UNC: \\\\host\\share)")
+		fmt.Fprintln(os.Stderr, "  -host, -h                 Target IP address or hostname  }  Required together")
+		fmt.Fprintln(os.Stderr, "  -share, -s                SMB share name                  }  if not using -dc/-tf")
 		fmt.Fprintln(os.Stderr, "\nAuthentication:")
-		fmt.Fprintln(os.Stderr, "  -username, -u       Username for authentication")
-		fmt.Fprintln(os.Stderr, "  -password, -p       Password for authentication")
-		fmt.Fprintln(os.Stderr, "  -domain, -d         Domain for authentication")
-		fmt.Fprintln(os.Stderr, "\nFiltering:")
-		fmt.Fprintln(os.Stderr, "  -no-exclusion       Disable all default exclusions (scan everything)")
-		fmt.Fprintln(os.Stderr, "  -exclude            Additional file extensions to exclude (comma-separated)")
-		fmt.Fprintln(os.Stderr, "  -exclude-folder     Additional folder names to exclude (comma-separated)")
+		fmt.Fprintln(os.Stderr, "  -username, -u       Username for authentication (required for -dc)")
+		fmt.Fprintln(os.Stderr, "  -password, -p       Password for authentication (required for -dc)")
+		fmt.Fprintln(os.Stderr, "  -domain, -d         Domain for authentication (required for -dc, e.g., corp.local)")
+		fmt.Fprintln(os.Stderr, "\nDiscovery Options:")
+		fmt.Fprintln(os.Stderr, "  --ldaps             Use LDAPS (port 636) instead of LDAP (port 389)")
+		fmt.Fprintln(os.Stderr, "  --channel-binding   Enable LDAP channel binding (requires --ldaps)")
+		fmt.Fprintln(os.Stderr, "  --dns-server, -dns  Custom DNS server IP for hostname resolution")
+		fmt.Fprintln(os.Stderr, "\nFiltering (supports regex patterns):")
+		fmt.Fprintln(os.Stderr, "  --show-default-exclusions             Show all default exclusions and exit")
+		fmt.Fprintln(os.Stderr, "  --no-default-exclusions       Disable all default exclusions (scan everything)")
+		fmt.Fprintln(os.Stderr, "  --exclude-extensions, -xe     Additional file extensions to exclude (comma-separated)")
+		fmt.Fprintln(os.Stderr, "  --exclude-directories, -xd    Additional directories to exclude (comma-separated)")
+		fmt.Fprintln(os.Stderr, "  --exclude-shares, -xs         Share names to exclude during discovery (comma-separated)")
 		fmt.Fprintln(os.Stderr, "\nOutput:")
 		fmt.Fprintln(os.Stderr, "  -o <path>           Single target: output file (default: <host>_<share>.txt)")
 		fmt.Fprintln(os.Stderr, "                      Batch mode: output directory (must exist)")
+		fmt.Fprintln(os.Stderr, "  --output-format, -of  Output formats to save (comma-separated: txt,json,jsonl,sarif)")
+		fmt.Fprintln(os.Stderr, "                        Default: txt. Requires -o flag.")
 		fmt.Fprintln(os.Stderr, "  -v                  Verbose output (show excluded files)")
 		fmt.Fprintln(os.Stderr, "\nBuilt-in Exclusions (enabled by default):")
+		fmt.Fprintln(os.Stderr, "  Shares:")
+		fmt.Fprintf(os.Stderr, "    %s\n", strings.Join(defaultExcludedShares, ", "))
 		fmt.Fprintln(os.Stderr, "  File Extensions:")
 		fmt.Fprintf(os.Stderr, "    %s\n", strings.Join(defaultExcludedExtensions, ", "))
-		fmt.Fprintln(os.Stderr, "  Folders:")
+		fmt.Fprintln(os.Stderr, "  Directories:")
 		fmt.Fprintf(os.Stderr, "    %s\n", strings.Join(defaultExcludedFolders, ", "))
 		fmt.Fprintln(os.Stderr, "\nExamples:")
+		fmt.Fprintln(os.Stderr, "  # Discover and scan all accessible shares in domain")
+		fmt.Fprintf(os.Stderr, "  %s -dc dc01.corp.local -u admin -p secret123 -d corp.local\n\n", os.Args[0])
+		fmt.Fprintln(os.Stderr, "  # Discovery with output to directory")
+		fmt.Fprintf(os.Stderr, "  %s -dc dc01.corp.local -u admin -p secret123 -d corp.local -o ./results/\n\n", os.Args[0])
 		fmt.Fprintln(os.Stderr, "  # Single target scan")
 		fmt.Fprintf(os.Stderr, "  %s -h 192.168.1.100 -s public\n\n", os.Args[0])
 		fmt.Fprintln(os.Stderr, "  # Batch scan from target file")
-		fmt.Fprintf(os.Stderr, "  %s --target-file targets.txt -u admin -p secret123\n\n", os.Args[0])
-		fmt.Fprintln(os.Stderr, "  # Batch scan with output to directory")
-		fmt.Fprintf(os.Stderr, "  %s -tf targets.txt -o ./results/ -u admin -p secret123\n\n", os.Args[0])
-		fmt.Fprintln(os.Stderr, "  # With domain credentials")
-		fmt.Fprintf(os.Stderr, "  %s -h dc01.corp.local -s SYSVOL -u admin -p secret123 -d CORP\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -tf targets.txt -u admin -p secret123 -d corp.local\n\n", os.Args[0])
 		fmt.Fprintln(os.Stderr, "Target file format (one per line):")
 		fmt.Fprintln(os.Stderr, "  192.168.1.10,share1       # CSV format")
 		fmt.Fprintln(os.Stderr, "  \\\\fileserver\\backup$      # UNC path")
@@ -412,6 +775,29 @@ func parseArgs() Config {
 	}
 
 	flag.Parse()
+
+	// Show exclusions and exit if requested
+	if showDefaultExclusions {
+		fmt.Println("Default Excluded Shares (regex patterns):")
+		for _, s := range defaultExcludedShares {
+			fmt.Printf("  %s\n", s)
+		}
+		fmt.Println("\nDefault Excluded Extensions:")
+		for _, e := range defaultExcludedExtensions {
+			fmt.Printf("  %s\n", e)
+		}
+		fmt.Println("\nDefault Excluded Directories:")
+		for _, d := range defaultExcludedFolders {
+			fmt.Printf("  %s\n", d)
+		}
+		os.Exit(0)
+	}
+
+	// Validate channel binding requires LDAPS
+	if config.ChannelBinding && !config.UseLDAPS {
+		fmt.Fprintln(os.Stderr, "Error: --channel-binding requires --ldaps")
+		os.Exit(1)
+	}
 
 	// Parse comma-separated lists
 	if additionalExts != "" {
@@ -430,6 +816,29 @@ func parseArgs() Config {
 		}
 	}
 
+	// Parse excluded shares (start with defaults, add user-specified)
+	if !config.NoExclusion {
+		config.ExcludedShares = append(config.ExcludedShares, defaultExcludedShares...)
+	}
+	if excludedShares != "" {
+		for _, share := range strings.Split(excludedShares, ",") {
+			config.ExcludedShares = append(config.ExcludedShares, strings.TrimSpace(share))
+		}
+	}
+
+	// Parse output formats
+	validFormats := map[string]bool{"txt": true, "json": true, "jsonl": true, "sarif": true}
+	if outputFormats != "" {
+		for _, format := range strings.Split(outputFormats, ",") {
+			format = strings.TrimSpace(strings.ToLower(format))
+			if !validFormats[format] {
+				fmt.Fprintf(os.Stderr, "Error: Invalid output format '%s'. Valid formats: txt, json, jsonl, sarif\n", format)
+				os.Exit(1)
+			}
+			config.OutputFormats = append(config.OutputFormats, format)
+		}
+	}
+
 	// Generate default output filename if -o was used without a filename (single target mode only)
 	// For batch mode, the OutputFile is treated as a directory and validated in main()
 	if config.SaveOutput && config.OutputFile == "" && config.TargetsFile == "" {
@@ -440,9 +849,7 @@ func parseArgs() Config {
 }
 
 func generateOutputFilename(host, share string) string {
-	// Replace dots with underscores in host
-	sanitizedHost := strings.ReplaceAll(host, ".", "_")
-	return fmt.Sprintf("%s_%s.txt", sanitizedHost, share)
+	return fmt.Sprintf("%s_%s.txt", sanitizeFilename(host), sanitizeFilename(share))
 }
 
 func extractOutputFlag(args []string) (bool, string, []string) {
@@ -492,17 +899,51 @@ func mountSMB(config Config) error {
 
 func dockerAvailable() bool {
 	cmd := exec.Command("docker", "info")
+	// Suppress output (including podman's "Emulate Docker CLI" message)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
 	return cmd.Run() == nil
 }
 
-func resolveHostToIP(host string) string {
+// stderrFilter filters out podman's "Emulate Docker CLI" message from stderr
+type stderrFilter struct {
+	w io.Writer
+}
+
+func (f *stderrFilter) Write(p []byte) (int, error) {
+	if strings.Contains(string(p), "Emulate Docker CLI") {
+		return len(p), nil
+	}
+	return f.w.Write(p)
+}
+
+// getResolver returns a custom DNS resolver if DNSServer is configured, otherwise nil (use default)
+func getResolver(dnsServer string) *net.Resolver {
+	if dnsServer == "" {
+		return net.DefaultResolver
+	}
+
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			d := net.Dialer{Timeout: 5 * time.Second}
+			return d.DialContext(ctx, "udp", dnsServer+":53")
+		},
+	}
+}
+
+func resolveHostToIP(host, dnsServer string) string {
 	// If it's already an IP address, return as-is
 	if net.ParseIP(host) != nil {
 		return host
 	}
 
-	// Try to resolve hostname to IP
-	addrs, err := net.LookupHost(host)
+	// Try to resolve hostname to IP using custom resolver if configured
+	resolver := getResolver(dnsServer)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	addrs, err := resolver.LookupHost(ctx, host)
 	if err == nil && len(addrs) > 0 {
 		return addrs[0]
 	}
@@ -538,7 +979,7 @@ func mountSMBLinux(config Config) error {
 
 	// Resolve hostname to IP and pass to mount.cifs via ip= option
 	// This helps when kernel CIFS has DNS resolution issues
-	resolvedIP := resolveHostToIP(config.Host)
+	resolvedIP := resolveHostToIP(config.Host, config.DNSServer)
 	baseOpts = append(baseOpts, fmt.Sprintf("ip=%s", resolvedIP))
 
 	// Try different SMB versions (Impacket supports 2.0, try that first)
@@ -557,7 +998,7 @@ func mountSMBLinux(config Config) error {
 		cmd := exec.Command("mount", "-t", "cifs", uncPath, config.MountPath, "-o", optString)
 		output, err := cmd.CombinedOutput()
 		if err == nil {
-			fmt.Fprintf(os.Stderr, "[+] Successfully mounted using SMB %s\n", version)
+			fmt.Fprintf(os.Stderr, "[+] Mounted to %s using SMB %s\n", config.MountPath, version)
 			return nil
 		}
 
@@ -687,10 +1128,17 @@ func matchesExtension(filename string, extensions []string) (bool, string) {
 	if ext == "" {
 		return false, ""
 	}
-	ext = strings.ToLower(ext)
-	for _, excludedExt := range extensions {
-		if strings.ToLower(excludedExt) == ext {
-			return true, fmt.Sprintf("**/*.%s", excludedExt)
+	for _, pattern := range extensions {
+		re, err := regexp.Compile("(?i)^" + pattern + "$") // case-insensitive, full match
+		if err != nil {
+			// If invalid regex, fall back to literal match
+			if strings.EqualFold(ext, pattern) {
+				return true, fmt.Sprintf("**/*.%s", pattern)
+			}
+			continue
+		}
+		if re.MatchString(ext) {
+			return true, fmt.Sprintf("**/*.%s", pattern)
 		}
 	}
 	return false, ""
@@ -699,9 +1147,17 @@ func matchesExtension(filename string, extensions []string) (bool, string) {
 func containsExcludedFolder(path string, folders []string) (bool, string) {
 	pathParts := strings.Split(filepath.ToSlash(path), "/")
 	for _, part := range pathParts {
-		for _, folder := range folders {
-			if part == folder {
-				return true, fmt.Sprintf("**/%s/**", folder)
+		for _, pattern := range folders {
+			re, err := regexp.Compile("(?i)^" + pattern + "$") // case-insensitive, full match
+			if err != nil {
+				// If invalid regex, fall back to literal match
+				if strings.EqualFold(part, pattern) {
+					return true, fmt.Sprintf("**/%s/**", pattern)
+				}
+				continue
+			}
+			if re.MatchString(part) {
+				return true, fmt.Sprintf("**/%s/**", pattern)
 			}
 		}
 	}
@@ -719,8 +1175,6 @@ func reportExclusions(scanPath string, config Config) {
 	if len(excludedExts) == 0 && len(excludedFolders) == 0 {
 		return
 	}
-
-	fmt.Fprintln(os.Stderr, "[*] Checking for excluded files...")
 
 	filepath.Walk(scanPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -798,8 +1252,10 @@ func runNoseyparker(config Config) error {
 
 	// Show exclusion info
 	if !config.NoExclusion {
-		fmt.Fprintf(os.Stderr, "[*] Using default exclusions (%d extensions, %d folders)\n",
-			len(defaultExcludedExtensions), len(defaultExcludedFolders))
+		if config.Verbose {
+			fmt.Fprintf(os.Stderr, "[*] Using default exclusions (%d extensions, %d folders)\n",
+				len(defaultExcludedExtensions), len(defaultExcludedFolders))
+		}
 	} else {
 		fmt.Fprintln(os.Stderr, "[*] WARNING: Scanning all files (no exclusions enabled)")
 	}
@@ -812,7 +1268,6 @@ func runNoseyparker(config Config) error {
 	reportExclusions(scanPath, config)
 
 	// Run noseyparker scan
-	fmt.Fprintf(os.Stderr, "[*] Scanning %s...\n", scanPath)
 	if err := runNoseyparkerScan(config, scanPath, datastorePath, datastore, ignoreFile); err != nil {
 		return err
 	}
@@ -830,13 +1285,9 @@ func runNoseyparker(config Config) error {
 		return nil
 	}
 
-	// Run noseyparker report to stdout (and optionally to file)
+	// Run noseyparker report to stdout (and optionally to file(s))
 	if err := runNoseyparkerReport(config, datastorePath, datastore); err != nil {
 		return err
-	}
-
-	if config.OutputFile != "" {
-		fmt.Fprintf(os.Stderr, "[+] Report saved to %s\n", config.OutputFile)
 	}
 
 	return nil
@@ -877,7 +1328,9 @@ func runNoseyparkerScan(config Config, scanPath, datastorePath, datastore, ignor
 		cmd = exec.Command("noseyparker", args...)
 	}
 
-	cmd.Stderr = os.Stderr
+	if config.Verbose {
+		cmd.Stderr = &stderrFilter{os.Stderr}
+	}
 	return cmd.Run()
 }
 
@@ -917,7 +1370,63 @@ func checkForFindings(config Config, datastorePath string) (bool, error) {
 	return false, nil
 }
 
+// getOutputFilePath returns the output file path for a given format.
+// It replaces or appends the appropriate extension based on the format.
+func getOutputFilePath(basePath, format string) string {
+	// Remove any existing extension from the base path
+	ext := filepath.Ext(basePath)
+	baseWithoutExt := strings.TrimSuffix(basePath, ext)
+
+	// Map format to file extension
+	extMap := map[string]string{
+		"txt":   ".txt",
+		"json":  ".json",
+		"jsonl": ".jsonl",
+		"sarif": ".sarif",
+	}
+
+	return baseWithoutExt + extMap[format]
+}
+
+// runNoseyparkerReportToFile runs noseyparker report with a specific format and writes to a file.
+func runNoseyparkerReportToFile(config Config, datastorePath, datastore, format, outputPath string) error {
+	var cmd *exec.Cmd
+
+	if config.UseDocker {
+		args := []string{"run", "--rm",
+			"-v", fmt.Sprintf("%s:/datastore", datastorePath),
+			dockerImage, "report", "--datastore", "/datastore/datastore",
+		}
+		if format != "txt" {
+			args = append(args, "--format", format)
+		}
+		cmd = exec.Command("docker", args...)
+	} else {
+		args := []string{"report", "--datastore", datastore}
+		if format != "txt" {
+			args = append(args, "--format", format)
+		}
+		cmd = exec.Command("noseyparker", args...)
+	}
+
+	outFile, err := os.Create(outputPath)
+	if err != nil {
+		return fmt.Errorf("failed to create output file %s: %w", outputPath, err)
+	}
+	defer outFile.Close()
+
+	cmd.Stdout = outFile
+	cmd.Stderr = &stderrFilter{os.Stderr}
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("noseyparker report (%s) failed: %w", format, err)
+	}
+
+	return nil
+}
+
 func runNoseyparkerReport(config Config, datastorePath, datastore string) error {
+	// Always output txt format to stdout
 	var cmd *exec.Cmd
 
 	if config.UseDocker {
@@ -930,22 +1439,28 @@ func runNoseyparkerReport(config Config, datastorePath, datastore string) error 
 		cmd = exec.Command("noseyparker", "report", "--datastore", datastore)
 	}
 
-	cmd.Stderr = os.Stderr
-
-	// Set up output: tee to file if -o is specified
-	if config.OutputFile != "" {
-		outFile, err := os.Create(config.OutputFile)
-		if err != nil {
-			return fmt.Errorf("failed to create output file: %w", err)
-		}
-		defer outFile.Close()
-		cmd.Stdout = io.MultiWriter(os.Stdout, outFile)
-	} else {
-		cmd.Stdout = os.Stdout
-	}
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = &stderrFilter{os.Stderr}
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("noseyparker report failed: %w", err)
+	}
+
+	// If output file is specified, generate files for each requested format
+	if config.SaveOutput && config.OutputFile != "" {
+		// Default to txt if no formats specified
+		formats := config.OutputFormats
+		if len(formats) == 0 {
+			formats = []string{"txt"}
+		}
+
+		for _, format := range formats {
+			outputPath := getOutputFilePath(config.OutputFile, format)
+			if err := runNoseyparkerReportToFile(config, datastorePath, datastore, format, outputPath); err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "[+] Report saved to %s\n", outputPath)
+		}
 	}
 
 	return nil
