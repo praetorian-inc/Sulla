@@ -45,6 +45,34 @@ wget -O smbellum https://github.com/praetorian-inc/SMBellum/releases/latest/down
 wget -O smbellum https://github.com/praetorian-inc/SMBellum/releases/latest/download/smbellum-linux-arm64
 ```
 
+### Docker
+
+Alternatively, run SMBellum via Docker without installing dependencies:
+
+```bash
+docker pull ghcr.io/praetorian-inc/smbellum:latest
+```
+
+Usage (mount current directory for output files):
+
+```bash
+docker run --rm --privileged --network=host \
+  -v $(pwd):/smbellum_output -w /smbellum_output \
+  ghcr.io/praetorian-inc/smbellum:latest \
+  -dc dc01.corp.local -u admin -p secret123 -d corp.local -o results -of txt,json
+```
+
+For convenience, create an alias:
+
+```bash
+alias smbellum='docker run --rm --privileged --network=host -v $(pwd):/smbellum_output -w /smbellum_output ghcr.io/praetorian-inc/smbellum:latest'
+
+# Then use normally
+smbellum -dc dc01.corp.local -u admin -p secret123 -d corp.local
+```
+
+> **Note:** Podman users (e.g., Kali) may need to run docker with `sudo`
+
 ## Usage
 
 ### Domain-Wide Share Discovery
