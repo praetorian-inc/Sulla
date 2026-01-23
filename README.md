@@ -53,7 +53,7 @@ Alternatively, run SMBellum via Docker without installing dependencies:
 docker pull ghcr.io/praetorian-inc/smbellum:latest
 ```
 
-Usage (mount current directory for output files):
+Docker usage:
 
 ```bash
 docker run --rm --privileged --network=host \
