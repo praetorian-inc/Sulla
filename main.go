@@ -1674,110 +1674,6 @@ func buildIgnorePatterns(config Config) []string {
 	return patterns
 }
 
-func getExcludedExtensions(config Config) []string {
-	var exts []string
-	if !config.NoExclusion {
-		exts = append(exts, defaultExcludedExtensions...)
-	}
-	exts = append(exts, config.AdditionalExts...)
-	return exts
-}
-
-func getExcludedFolders(config Config) []string {
-	var folders []string
-	if !config.NoExclusion {
-		folders = append(folders, defaultExcludedFolders...)
-	}
-	folders = append(folders, config.AdditionalFolders...)
-	return folders
-}
-
-func matchesExtension(filename string, extensions []string) (bool, string) {
-	ext := strings.TrimPrefix(filepath.Ext(filename), ".")
-	if ext == "" {
-		return false, ""
-	}
-	for _, pattern := range extensions {
-		re, err := regexp.Compile("(?i)^" + pattern + "$") // case-insensitive, full match
-		if err != nil {
-			// If invalid regex, fall back to literal match
-			if strings.EqualFold(ext, pattern) {
-				return true, fmt.Sprintf("**/*.%s", pattern)
-			}
-			continue
-		}
-		if re.MatchString(ext) {
-			return true, fmt.Sprintf("**/*.%s", pattern)
-		}
-	}
-	return false, ""
-}
-
-func containsExcludedFolder(path string, folders []string) (bool, string) {
-	pathParts := strings.Split(filepath.ToSlash(path), "/")
-	for _, part := range pathParts {
-		for _, pattern := range folders {
-			re, err := regexp.Compile("(?i)^" + pattern + "$") // case-insensitive, full match
-			if err != nil {
-				// If invalid regex, fall back to literal match
-				if strings.EqualFold(part, pattern) {
-					return true, fmt.Sprintf("**/%s/**", pattern)
-				}
-				continue
-			}
-			if re.MatchString(part) {
-				return true, fmt.Sprintf("**/%s/**", pattern)
-			}
-		}
-	}
-	return false, ""
-}
-
-func reportExclusions(scanPath string, config Config) {
-	if !config.Verbose {
-		return
-	}
-
-	excludedExts := getExcludedExtensions(config)
-	excludedFolders := getExcludedFolders(config)
-
-	if len(excludedExts) == 0 && len(excludedFolders) == 0 {
-		return
-	}
-
-	filepath.Walk(scanPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil // Skip files we can't access
-		}
-
-		// Get relative path for cleaner output
-		relPath, _ := filepath.Rel(scanPath, path)
-		if relPath == "." {
-			return nil
-		}
-
-		// Check folder exclusions first
-		if matched, rule := containsExcludedFolder(relPath, excludedFolders); matched {
-			timestamp := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
-			fmt.Fprintf(os.Stderr, "%s  WARN exclusion: Skipping entry: %s (matched rule: %s)\n", timestamp, relPath, rule)
-			if info.IsDir() {
-				return filepath.SkipDir // Skip entire directory
-			}
-			return nil
-		}
-
-		// Check file extension exclusions
-		if !info.IsDir() {
-			if matched, rule := matchesExtension(info.Name(), excludedExts); matched {
-				timestamp := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
-				fmt.Fprintf(os.Stderr, "%s  WARN exclusion: Skipping entry: %s (matched rule: %s)\n", timestamp, relPath, rule)
-			}
-		}
-
-		return nil
-	})
-}
-
 func runNoseyparker(config Config) (bool, error) {
 	var scanPath string
 
@@ -1832,9 +1728,6 @@ func runNoseyparker(config Config) (bool, error) {
 		fmt.Fprintf(os.Stderr, "[*] Additional exclusions: %d extensions, %d folders\n",
 			len(config.AdditionalExts), len(config.AdditionalFolders))
 	}
-
-	// Report all excluded files
-	reportExclusions(scanPath, config)
 
 	// Run noseyparker scan
 	if err := runNoseyparkerScan(config, scanPath, datastorePath, datastore, ignoreFile); err != nil {
