@@ -93,7 +93,7 @@ smbellum -u admin -p secret123 -d corp.local -dns 10.0.0.1
 smbellum -u admin -p secret123 -d corp.local -o results/ -of txt,json
 ```
 
-SMBellum discovers domain controllers via DNS SRV records (`_ldap._tcp.dc._msdcs.<domain>`). If the first DC is unreachable, it automatically tries others.
+> SMBellum discovers domain controllers via DNS SRV records (`_ldap._tcp.dc._msdcs.<domain>`). If the first DC is unreachable, it automatically tries others.
 
 ### Discovery-Only Mode
 
@@ -140,13 +140,13 @@ smbellum -h fileserver.corp.local -s SYSVOL -u admin -p secret123 -d corp.local
 
 ## Options
 
-### Target Selection (mutually exclusive)
+### Target Selection
 
 | Flag | Description |
 |------|-------------|
-| `-d` with `-u`/`-p` | Auto-discover DC via DNS SRV and scan all accessible shares |
-| `--domain-controller`, `-dc` | Explicitly specify domain controller (optional, skips auto-discovery) |
-| `--target-file`, `-tf` | File containing targets (CSV or UNC paths) |
+| `-d` without `-h`/`-s`/`-tf` | Auto-discover domain controller, auto-discover all readable shares, and scan |
+| `--domain-controller`, `-dc` | Explicitly specify domain controller (optional) |
+| `--target-file`, `-tf` | File containing SMB shares to scan (CSV or UNC paths) |
 | `--host`, `-h` | Target IP address or hostname |
 | `--share`, `-s` | SMB share name (required with `--host`) |
 
@@ -154,9 +154,9 @@ smbellum -h fileserver.corp.local -s SYSVOL -u admin -p secret123 -d corp.local
 
 | Flag | Description |
 |------|-------------|
-| `--username`, `-u` | Username for authentication (required for discovery) |
-| `--password`, `-p` | Password for authentication (required for discovery) |
-| `--domain`, `-d` | Domain for authentication (required for discovery, e.g., `corp.local`) |
+| `--username`, `-u` | Username for authentication |
+| `--password`, `-p` | Password for authentication |
+| `--domain`, `-d` | Fully qualified domain for authentication |
 
 ### Discovery Options
 
@@ -216,7 +216,4 @@ Use `--show-default-exclusions` to see the complete list, or `--no-default-exclu
 - Shares are mounted read-only for safety
 - Automatically cleans up mounts on completion or interruption (Ctrl+C)
 - Discovery mode filters out disabled AD accounts and machines inactive for >4 months, a la [Snaffler](https://github.com/SnaffCon/Snaffler)
-- Discovery uses 10 parallel workers for efficient share enumeration
-- If Noseyparker is not in PATH, SMBellum will automatically use Docker if available
-- DC auto-discovery uses DNS SRV records; use `-dns` to specify a custom DNS server if needed
 - Only shares with read access are reported during discovery
