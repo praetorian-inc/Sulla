@@ -120,20 +120,25 @@ func main() {
 		}
 	}
 
-	// Validate target selection: --dc OR --target-file OR (-h AND -s), mutually exclusive
-	hasDiscovery := config.DomainController != ""
+	// Validate target selection: discovery mode OR --target-file OR (-h AND -s), mutually exclusive
+	// Discovery mode triggers when: domain + credentials provided AND no -h/-s AND no -tf
+	hasExplicitDC := config.DomainController != ""
+	hasCredentials := config.Username != "" && config.Password != "" && config.Domain != ""
 	hasTargetFile := config.TargetsFile != ""
 	hasHostShare := config.Host != "" && config.Share != ""
 	hasPartialHostShare := config.Host != "" || config.Share != ""
+
+	// Discovery mode: explicit DC OR (credentials without other target methods)
+	hasDiscovery := hasExplicitDC || (hasCredentials && !hasTargetFile && !hasPartialHostShare)
 	isBatchMode := hasDiscovery || hasTargetFile
 
 	// Check mutual exclusivity
-	if hasDiscovery && hasTargetFile {
+	if hasExplicitDC && hasTargetFile {
 		fmt.Fprintln(os.Stderr, "Error: Cannot use --domain-controller with --target-file. Choose one input method.")
 		flag.Usage()
 		os.Exit(1)
 	}
-	if hasDiscovery && hasPartialHostShare {
+	if hasExplicitDC && hasPartialHostShare {
 		fmt.Fprintln(os.Stderr, "Error: Cannot use --domain-controller with -h/-s. Choose one input method.")
 		flag.Usage()
 		os.Exit(1)
@@ -147,7 +152,7 @@ func main() {
 	// Validate discovery mode requirements
 	if hasDiscovery {
 		if config.Username == "" || config.Password == "" || config.Domain == "" {
-			fmt.Fprintln(os.Stderr, "Error: --domain-controller requires -u <username>, -p <password>, and -d <domain>.")
+			fmt.Fprintln(os.Stderr, "Error: Discovery mode requires -u <username>, -p <password>, and -d <domain>.")
 			flag.Usage()
 			os.Exit(1)
 		}
@@ -155,14 +160,16 @@ func main() {
 
 	// Validate that at least one input method is provided
 	if !hasDiscovery && !hasTargetFile && !hasHostShare {
-		fmt.Fprintln(os.Stderr, "Error: Provide --domain-controller, --target-file <file>, OR both -h <host> and -s <share>.")
+		fmt.Fprintln(os.Stderr, "Error: Provide -d <domain> with credentials for auto-discovery,")
+		fmt.Fprintln(os.Stderr, "       --domain-controller <dc> for explicit DC,")
+		fmt.Fprintln(os.Stderr, "       --target-file <file>, OR both -h <host> and -s <share>.")
 		flag.Usage()
 		os.Exit(1)
 	}
 
-	// Validate --no-noseyparker only works with --domain-controller
+	// Validate --no-noseyparker only works with discovery mode
 	if config.NoNoseyparker && !hasDiscovery {
-		fmt.Fprintln(os.Stderr, "Error: --no-noseyparker/-nn requires --domain-controller/-dc mode.")
+		fmt.Fprintln(os.Stderr, "Error: --no-noseyparker/-nn requires discovery mode (provide -d <domain> with credentials).")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -424,8 +431,12 @@ func outputDiscoveredShares(config Config, targets []Target) {
 
 	// Determine output destination
 	if config.SaveOutput {
-		// Generate filename: {dc}_discovered_smb_shares.txt
-		filename := fmt.Sprintf("%s_discovered_smb_shares.txt", sanitizeFilename(config.DomainController))
+		// Generate filename: {dc_or_domain}_discovered_smb_shares.txt
+		nameBase := config.DomainController
+		if nameBase == "" {
+			nameBase = config.Domain
+		}
+		filename := fmt.Sprintf("%s_discovered_smb_shares.txt", sanitizeFilename(nameBase))
 
 		// If OutputFile is a directory, write file into it
 		outputPath := config.OutputFile
@@ -472,9 +483,27 @@ func domainToBaseDN(domain string) string {
 
 // discoverTargets orchestrates host and share discovery with parallel workers
 func discoverTargets(config Config) ([]Target, error) {
-	// Step 1: Discover computers from AD
-	fmt.Fprintf(os.Stderr, "[*] Querying AD for computer objects from %s...\n", config.DomainController)
-	computers, err := discoverComputers(config)
+	// Step 1: Get list of domain controllers to try
+	var domainControllers []string
+
+	if config.DomainController != "" {
+		// User explicitly specified a DC
+		domainControllers = []string{config.DomainController}
+		fmt.Fprintf(os.Stderr, "[*] Using specified domain controller: %s\n", config.DomainController)
+	} else {
+		// Auto-discover DCs via DNS SRV lookup
+		fmt.Fprintf(os.Stderr, "[*] Discovering domain controllers for %s...\n", config.Domain)
+		dcs, err := discoverDomainControllers(config.Domain, config.DNSServer)
+		if err != nil {
+			return nil, fmt.Errorf("could not auto-discover domain controller for %s: %w\n\nProvide a domain controller explicitly with -dc <hostname>\nor try a different DNS server with -dns <ip>", config.Domain, err)
+		}
+		domainControllers = dcs
+		fmt.Fprintf(os.Stderr, "[+] Discovered %d domain controller(s): %s\n", len(dcs), strings.Join(dcs, ", "))
+	}
+
+	// Step 2: Discover computers from AD
+	fmt.Fprintf(os.Stderr, "[*] Querying AD for computer objects...\n")
+	computers, err := discoverComputers(config, domainControllers)
 	if err != nil {
 		return nil, fmt.Errorf("failed to discover computers: %w", err)
 	}
@@ -549,68 +578,144 @@ func discoverTargets(config Config) ([]Target, error) {
 	return targets, nil
 }
 
-// connectLDAPWithTLS establishes an LDAPS connection
-func connectLDAPWithTLS(config Config) (*ldap.Conn, error) {
-	// TLS config - accept self-signed certs (pentesting tool)
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: true,
-		ServerName:         config.DomainController,
+// discoverDomainControllers performs DNS SRV lookup to find domain controllers for a domain
+func discoverDomainControllers(domain, dnsServer string) ([]string, error) {
+	resolver := getResolver(dnsServer)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Try the DC-specific SRV record first: _ldap._tcp.dc._msdcs.<domain>
+	_, srvs, err := resolver.LookupSRV(ctx, "ldap", "tcp", "dc._msdcs."+domain)
+	if err != nil || len(srvs) == 0 {
+		// Fallback to generic LDAP SRV record: _ldap._tcp.<domain>
+		_, srvs, err = resolver.LookupSRV(ctx, "ldap", "tcp", domain)
 	}
 
-	// Connect to LDAPS (port 636)
-	ldapsURL := fmt.Sprintf("ldaps://%s:636", config.DomainController)
-	l, err := ldap.DialURL(ldapsURL, ldap.DialWithTLSConfig(tlsConfig))
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to DC via LDAPS: %w", err)
+		return nil, fmt.Errorf("DNS SRV lookup failed: %w", err)
+	}
+
+	if len(srvs) == 0 {
+		return nil, fmt.Errorf("no SRV records found")
+	}
+
+	// Extract hostnames, sorted by priority (lower = higher priority) and weight
+	// Go's LookupSRV already returns results sorted by priority
+	var dcs []string
+	for _, srv := range srvs {
+		// Remove trailing dot from DNS name
+		dc := strings.TrimSuffix(srv.Target, ".")
+		if dc != "" {
+			dcs = append(dcs, dc)
+		}
+	}
+
+	return dcs, nil
+}
+
+// connectToLDAP establishes an LDAP connection to the specified domain controller
+func connectToLDAP(dc string, config Config) (*ldap.Conn, error) {
+	var l *ldap.Conn
+	var err error
+
+	// Resolve DC hostname using custom DNS server if configured
+	dcAddr := dc
+	if net.ParseIP(dc) == nil {
+		// It's a hostname, resolve it
+		resolver := getResolver(config.DNSServer)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		ips, resolveErr := resolver.LookupHost(ctx, dc)
+		if resolveErr != nil {
+			return nil, fmt.Errorf("DNS resolution failed for %s: %w", dc, resolveErr)
+		}
+		if len(ips) == 0 {
+			return nil, fmt.Errorf("no IP addresses found for %s", dc)
+		}
+		dcAddr = ips[0]
+	}
+
+	if config.UseLDAPS {
+		// TLS config - accept self-signed certs (pentesting tool)
+		tlsConfig := &tls.Config{
+			InsecureSkipVerify: true,
+			ServerName:         dc, // Use original hostname for TLS SNI
+		}
+
+		// Connect to LDAPS (port 636) using resolved IP
+		ldapsURL := fmt.Sprintf("ldaps://%s:636", dcAddr)
+		l, err = ldap.DialURL(ldapsURL, ldap.DialWithTLSConfig(tlsConfig))
+		if err != nil {
+			return nil, fmt.Errorf("failed to connect via LDAPS: %w", err)
+		}
+
+		if config.ChannelBinding {
+			// Use NTLM authentication over LDAPS
+			err = l.NTLMBind(config.Domain, config.Username, config.Password)
+			if err != nil {
+				l.Close()
+				return nil, fmt.Errorf("NTLM bind over LDAPS failed: %w", err)
+			}
+		} else {
+			// Simple bind over LDAPS
+			bindUser := fmt.Sprintf("%s@%s", config.Username, config.Domain)
+			err = l.Bind(bindUser, config.Password)
+			if err != nil {
+				l.Close()
+				return nil, fmt.Errorf("LDAP bind failed: %w", err)
+			}
+		}
+	} else {
+		// Plain LDAP (port 389) using resolved IP
+		l, err = ldap.DialURL(fmt.Sprintf("ldap://%s:389", dcAddr))
+		if err != nil {
+			return nil, fmt.Errorf("failed to connect to DC: %w", err)
+		}
+
+		// Bind with credentials (UPN format: user@domain works best with FQDN domains)
+		bindUser := fmt.Sprintf("%s@%s", config.Username, config.Domain)
+		err = l.Bind(bindUser, config.Password)
+		if err != nil {
+			l.Close()
+			return nil, fmt.Errorf("LDAP bind failed: %w", err)
+		}
 	}
 
 	return l, nil
 }
 
 // discoverComputers queries AD via LDAP for all computer objects
-func discoverComputers(config Config) ([]string, error) {
+// It tries each domain controller in the list until one succeeds
+func discoverComputers(config Config, domainControllers []string) ([]string, error) {
 	var l *ldap.Conn
 	var err error
+	var connectedDC string
 
-	if config.UseLDAPS {
-		l, err = connectLDAPWithTLS(config)
-		if err != nil {
-			return nil, err
+	// Try each DC until one works
+	for _, dc := range domainControllers {
+		l, err = connectToLDAP(dc, config)
+		if err == nil {
+			connectedDC = dc
+			break
 		}
-		defer l.Close()
+		fmt.Fprintf(os.Stderr, "[!] Failed to connect to %s: %v\n", dc, err)
+	}
 
+	if l == nil {
+		return nil, fmt.Errorf("failed to connect to any domain controller")
+	}
+	defer l.Close()
+
+	// Print connection info
+	if config.UseLDAPS {
 		if config.ChannelBinding {
-			// Use NTLM authentication over LDAPS
-			// NTLM over TLS provides protection against credential forwarding attacks
-			// The go-ldap library's NTLMBind uses go-ntlmssp which negotiates NTLMv2
-			err = l.NTLMBind(config.Domain, config.Username, config.Password)
-			if err != nil {
-				return nil, fmt.Errorf("NTLM bind over LDAPS failed: %w", err)
-			}
-			fmt.Fprintln(os.Stderr, "[+] LDAPS connection with NTLM authentication established")
+			fmt.Fprintf(os.Stderr, "[+] LDAPS connection with NTLM authentication established to %s\n", connectedDC)
 		} else {
-			// Simple bind over LDAPS
-			bindUser := fmt.Sprintf("%s@%s", config.Username, config.Domain)
-			err = l.Bind(bindUser, config.Password)
-			if err != nil {
-				return nil, fmt.Errorf("LDAP bind failed: %w", err)
-			}
-			fmt.Fprintln(os.Stderr, "[+] LDAPS connection established")
+			fmt.Fprintf(os.Stderr, "[+] LDAPS connection established to %s\n", connectedDC)
 		}
 	} else {
-		// Plain LDAP (port 389)
-		l, err = ldap.DialURL(fmt.Sprintf("ldap://%s:389", config.DomainController))
-		if err != nil {
-			return nil, fmt.Errorf("failed to connect to DC: %w", err)
-		}
-		defer l.Close()
-
-		// Bind with credentials (UPN format: user@domain works best with FQDN domains)
-		bindUser := fmt.Sprintf("%s@%s", config.Username, config.Domain)
-		err = l.Bind(bindUser, config.Password)
-		if err != nil {
-			return nil, fmt.Errorf("LDAP bind failed: %w", err)
-		}
+		fmt.Fprintf(os.Stderr, "[+] LDAP connection established to %s\n", connectedDC)
 	}
 
 	// Search for computer objects using paged search to handle large domains
@@ -800,18 +905,19 @@ func parseArgs() Config {
 		fmt.Fprintf(os.Stderr, "Usage: %s [options]\n\n", os.Args[0])
 		fmt.Fprintln(os.Stderr, "A tool to mount SMB shares and scan for secrets using Noseyparker")
 		fmt.Fprintln(os.Stderr, "\nTarget Selection (choose one):")
-		fmt.Fprintln(os.Stderr, "  --domain-controller, -dc  Discover and scan all accessible AD shares")
+		fmt.Fprintln(os.Stderr, "  -d <domain> -u -p         Auto-discover DC and scan all accessible AD shares")
+		fmt.Fprintln(os.Stderr, "  --domain-controller, -dc  Explicitly specify domain controller (optional)")
 		fmt.Fprintln(os.Stderr, "  --target-file, -tf        File with targets (CSV: host,share or UNC: \\\\host\\share)")
 		fmt.Fprintln(os.Stderr, "  -host, -h                 Target IP address or hostname  }  Required together")
-		fmt.Fprintln(os.Stderr, "  -share, -s                SMB share name                  }  if not using -dc/-tf")
+		fmt.Fprintln(os.Stderr, "  -share, -s                SMB share name                  }  if not using discovery/-tf")
 		fmt.Fprintln(os.Stderr, "\nAuthentication:")
-		fmt.Fprintln(os.Stderr, "  -username, -u       Username for authentication (required for -dc)")
-		fmt.Fprintln(os.Stderr, "  -password, -p       Password for authentication (required for -dc)")
-		fmt.Fprintln(os.Stderr, "  -domain, -d         Domain for authentication (required for -dc, e.g., corp.local)")
+		fmt.Fprintln(os.Stderr, "  -username, -u       Username for authentication (required for discovery)")
+		fmt.Fprintln(os.Stderr, "  -password, -p       Password for authentication (required for discovery)")
+		fmt.Fprintln(os.Stderr, "  -domain, -d         Domain for authentication (required for discovery, e.g., corp.local)")
 		fmt.Fprintln(os.Stderr, "\nDiscovery Options:")
 		fmt.Fprintln(os.Stderr, "  --ldaps             Use LDAPS (port 636) instead of LDAP (port 389)")
 		fmt.Fprintln(os.Stderr, "  --channel-binding   Enable LDAP channel binding (requires --ldaps)")
-		fmt.Fprintln(os.Stderr, "  --dns-server, -dns  Custom DNS server IP for hostname resolution")
+		fmt.Fprintln(os.Stderr, "  --dns-server, -dns  Custom DNS server IP for DC discovery and hostname resolution")
 		fmt.Fprintln(os.Stderr, "  --no-noseyparker, -nn  Discovery only: output shares in UNC format, skip scanning")
 		fmt.Fprintln(os.Stderr, "\nFiltering (supports regex patterns):")
 		fmt.Fprintln(os.Stderr, "  --show-default-exclusions             Show all default exclusions and exit")
@@ -833,14 +939,16 @@ func parseArgs() Config {
 		fmt.Fprintln(os.Stderr, "  Directories:")
 		fmt.Fprintf(os.Stderr, "    %s\n", strings.Join(defaultExcludedFolders, ", "))
 		fmt.Fprintln(os.Stderr, "\nExamples:")
-		fmt.Fprintln(os.Stderr, "  # Discover and scan all accessible shares in domain")
+		fmt.Fprintln(os.Stderr, "  # Auto-discover DC and scan all accessible shares in domain")
+		fmt.Fprintf(os.Stderr, "  %s -u admin -p secret123 -d corp.local\n\n", os.Args[0])
+		fmt.Fprintln(os.Stderr, "  # Same as above, with explicit DC (skips auto-discovery)")
 		fmt.Fprintf(os.Stderr, "  %s -dc dc01.corp.local -u admin -p secret123 -d corp.local\n\n", os.Args[0])
+		fmt.Fprintln(os.Stderr, "  # Auto-discovery with custom DNS server")
+		fmt.Fprintf(os.Stderr, "  %s -u admin -p secret123 -d corp.local -dns 10.0.0.1\n\n", os.Args[0])
 		fmt.Fprintln(os.Stderr, "  # Discovery with output to directory")
-		fmt.Fprintf(os.Stderr, "  %s -dc dc01.corp.local -u admin -p secret123 -d corp.local -o ./results/\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -u admin -p secret123 -d corp.local -o ./results/\n\n", os.Args[0])
 		fmt.Fprintln(os.Stderr, "  # Discovery only (no scanning), output UNC paths to stdout")
-		fmt.Fprintf(os.Stderr, "  %s -dc dc01.corp.local -u admin -p secret123 -d corp.local -nn\n\n", os.Args[0])
-		fmt.Fprintln(os.Stderr, "  # Discovery only, save to file")
-		fmt.Fprintf(os.Stderr, "  %s -dc dc01.corp.local -u admin -p secret123 -d corp.local -nn -o ./\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -u admin -p secret123 -d corp.local -nn\n\n", os.Args[0])
 		fmt.Fprintln(os.Stderr, "  # Single target scan")
 		fmt.Fprintf(os.Stderr, "  %s -h 192.168.1.100 -s public\n\n", os.Args[0])
 		fmt.Fprintln(os.Stderr, "  # Batch scan from target file")
@@ -916,8 +1024,10 @@ func parseArgs() Config {
 	}
 
 	// Generate default output filename if -o was used without a filename (single target mode only)
-	// For batch mode, the OutputFile is treated as a directory and validated in main()
-	if config.SaveOutput && config.TargetsFile == "" && config.DomainController == "" {
+	// For batch mode (including auto-discovery), the OutputFile is treated as a directory and validated in main()
+	// Auto-discovery mode is when credentials are provided without explicit targets
+	isAutoDiscovery := config.Username != "" && config.Password != "" && config.Domain != "" && config.Host == "" && config.TargetsFile == ""
+	if config.SaveOutput && config.TargetsFile == "" && config.DomainController == "" && !isAutoDiscovery {
 		if config.OutputFile == "" {
 			// -o with no argument: use default filename
 			config.OutputFile = generateOutputFilename(config.Host, config.Share)

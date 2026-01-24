@@ -59,7 +59,7 @@ Docker usage:
 docker run --rm --privileged --network=host \
   -v $(pwd):/smbellum_output -w /smbellum_output \
   ghcr.io/praetorian-inc/smbellum:latest \
-  -dc dc01.corp.local -u admin -p secret123 -d corp.local -o results -of txt,json
+  -u admin -p secret123 -d corp.local -o results -of txt,json
 ```
 
 For convenience, create an alias:
@@ -68,7 +68,7 @@ For convenience, create an alias:
 alias smbellum='docker run --rm --privileged --network=host -v $(pwd):/smbellum_output -w /smbellum_output ghcr.io/praetorian-inc/smbellum:latest'
 
 # Then use normally
-smbellum -dc dc01.corp.local -u admin -p secret123 -d corp.local
+smbellum -u admin -p secret123 -d corp.local
 ```
 
 > **Note:** Podman users (e.g., Kali) may need to run docker with `sudo`
@@ -80,12 +80,20 @@ smbellum -dc dc01.corp.local -u admin -p secret123 -d corp.local
 Automatically discover and scan all accessible SMB shares across an Active Directory domain:
 
 ```bash
-# Discover and scan all accessible shares in domain
+# Auto-discover DC and scan all accessible shares (recommended)
+smbellum -u admin -p secret123 -d corp.local
+
+# Explicitly specify DC (skips auto-discovery)
 smbellum -dc dc01.corp.local -u admin -p secret123 -d corp.local
 
+# Use custom DNS server for DC discovery and hostname resolution
+smbellum -u admin -p secret123 -d corp.local -dns 10.0.0.1
+
 # Save results to a directory in txt and json format
-smbellum -dc dc01.corp.local -u admin -p secret123 -d corp.local -o results/ -of txt,json
+smbellum -u admin -p secret123 -d corp.local -o results/ -of txt,json
 ```
+
+SMBellum discovers domain controllers via DNS SRV records (`_ldap._tcp.dc._msdcs.<domain>`). If the first DC is unreachable, it automatically tries others.
 
 ### Discovery-Only Mode
 
@@ -93,10 +101,10 @@ Discover accessible shares without running Noseyparker scans. Outputs UNC paths 
 
 ```bash
 # Discover reachable shares without secret scanning
-smbellum -dc dc01.corp.local -u admin -p secret123 -d corp.local -nn -o
+smbellum -u admin -p secret123 -d corp.local -nn -o
 
 # Later, use discovered shares as target file input:
-smbellum -tf dc01_corp_local_discovered_smb_shares.txt -u admin -p secret123 -d corp.local
+smbellum -tf corp_local_discovered_smb_shares.txt -u admin -p secret123 -d corp.local
 ```
 
 Useful when:
@@ -136,7 +144,8 @@ smbellum -h fileserver.corp.local -s SYSVOL -u admin -p secret123 -d corp.local
 
 | Flag | Description |
 |------|-------------|
-| `--domain-controller`, `-dc` | Domain controller for AD share discovery |
+| `-d` with `-u`/`-p` | Auto-discover DC via DNS SRV and scan all accessible shares |
+| `--domain-controller`, `-dc` | Explicitly specify domain controller (optional, skips auto-discovery) |
 | `--target-file`, `-tf` | File containing targets (CSV or UNC paths) |
 | `--host`, `-h` | Target IP address or hostname |
 | `--share`, `-s` | SMB share name (required with `--host`) |
@@ -145,9 +154,9 @@ smbellum -h fileserver.corp.local -s SYSVOL -u admin -p secret123 -d corp.local
 
 | Flag | Description |
 |------|-------------|
-| `--username`, `-u` | Username for authentication (required for `-dc`) |
-| `--password`, `-p` | Password for authentication (required for `-dc`) |
-| `--domain`, `-d` | Domain for authentication (required for `-dc`) |
+| `--username`, `-u` | Username for authentication (required for discovery) |
+| `--password`, `-p` | Password for authentication (required for discovery) |
+| `--domain`, `-d` | Domain for authentication (required for discovery, e.g., `corp.local`) |
 
 ### Discovery Options
 
@@ -209,3 +218,5 @@ Use `--show-default-exclusions` to see the complete list, or `--no-default-exclu
 - Discovery mode filters out disabled AD accounts and machines inactive for >4 months, a la [Snaffler](https://github.com/SnaffCon/Snaffler)
 - Discovery uses 10 parallel workers for efficient share enumeration
 - If Noseyparker is not in PATH, SMBellum will automatically use Docker if available
+- DC auto-discovery uses DNS SRV records; use `-dns` to specify a custom DNS server if needed
+- Only shares with read access are reported during discovery
