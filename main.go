@@ -245,7 +245,7 @@ func main() {
 		// Set output file for batch mode
 		if isBatchMode && config.SaveOutput {
 			targetConfig.OutputFile = filepath.Join(config.OutputFile,
-				fmt.Sprintf("%s_%s.txt", sanitizeFilename(target.Host), sanitizeFilename(target.Share)))
+				fmt.Sprintf("%s__%s.txt", sanitizeFilename(target.Host), sanitizeFilename(target.Share)))
 		}
 
 		err := scanTarget(targetConfig)
@@ -1058,7 +1058,7 @@ func parseArgs() Config {
 }
 
 func generateOutputFilename(host, share string) string {
-	return fmt.Sprintf("%s_%s.txt", sanitizeFilename(host), sanitizeFilename(share))
+	return fmt.Sprintf("%s__%s.txt", sanitizeFilename(host), sanitizeFilename(share))
 }
 
 func extractOutputFlag(args []string) (bool, string, []string) {
