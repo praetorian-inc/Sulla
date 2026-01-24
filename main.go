@@ -680,7 +680,7 @@ func generateTabulatoriumOutput(config Config, results []ScanResult) error {
 	}
 
 	// Determine output path
-	filename := fmt.Sprintf("%s_tabularium.json", sanitizeFilename(config.Domain))
+	filename := fmt.Sprintf("%s.tabularium", sanitizeFilename(config.Domain))
 	outputPath := filename
 	if config.OutputFile != "" {
 		// Check if OutputFile is a directory
@@ -2018,7 +2018,13 @@ func runNoseyparkerReport(config Config, datastorePath, datastore string) error 
 	// If output file is specified, generate files for each requested format
 	if config.SaveOutput && config.OutputFile != "" {
 		// Default to txt if no formats specified
-		formats := config.OutputFormats
+		// Filter out tabularium - it's handled separately by SMBellum, not Noseyparker
+		var formats []string
+		for _, f := range config.OutputFormats {
+			if f != "tabularium" {
+				formats = append(formats, f)
+			}
+		}
 		if len(formats) == 0 {
 			formats = []string{"txt"}
 		}

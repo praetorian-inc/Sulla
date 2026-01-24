@@ -208,20 +208,7 @@ Use `--show-default-exclusions` to see the complete list, or `--no-default-exclu
 | `json` | JSON format for programmatic processing |
 | `jsonl` | JSON Lines format (one finding per line) |
 | `sarif` | SARIF format for integration with security tools |
-| `tabularium` | Guard platform format (discovery mode only) |
-
-### Tabularium Format
-
-The `tabularium` format generates JSON compatible with Praetorian's Guard platform. This format:
-- Only works in discovery mode (requires `-d` with credentials)
-- Fetches AD object SIDs during LDAP enumeration
-- Aggregates all Noseyparker findings per computer into a single risk
-- Creates `adcomputer` objects and `risk` objects with proof files
-
-Example:
-```bash
-smbellum -u admin -p secret123 -d corp.local -o results/ -of txt,tabularium
-```
+| `tabularium` | [Tabularium](https://github.com/praetorian-inc/tabularium) format (discovery mode only) |
 
 
 ## Notes
