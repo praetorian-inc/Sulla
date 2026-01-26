@@ -4,6 +4,9 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -38,15 +41,16 @@ type Config struct {
 	ExcludedShares     []string
 	SaveOutput         bool
 	OutputFile         string
-	OutputFormats      []string // Output formats: txt, json, jsonl, sarif
+	OutputFormats      []string // Output formats: txt, json, jsonl, sarif, tabularium
 	Verbose            bool
 	UseDocker          bool
 	TargetsFile        string
 	DomainController   string
-	UseLDAPS           bool   // Use LDAPS (port 636) instead of LDAP (port 389)
-	ChannelBinding     bool   // Enable LDAP channel binding (requires TLS)
-	DNSServer          string // Custom DNS server IP for lookups
-	NoNoseyparker      bool   // Discovery-only mode: output shares without scanning
+	UseLDAPS           bool             // Use LDAPS (port 636) instead of LDAP (port 389)
+	ChannelBinding     bool             // Enable LDAP channel binding (requires TLS)
+	DNSServer          string           // Custom DNS server IP for lookups
+	NoNoseyparker      bool             // Discovery-only mode: output shares without scanning
+	DiscoveryResult    *DiscoveryResult // AD discovery metadata for tabularium output
 }
 
 // Target represents a single host/share combination to scan
@@ -55,11 +59,89 @@ type Target struct {
 	Share string
 }
 
+// ComputerInfo holds AD computer metadata for tabularium output
+type ComputerInfo struct {
+	DNSHostName       string
+	SID               string
+	DistinguishedName string
+}
+
+// DomainInfo holds AD domain metadata for tabularium output
+type DomainInfo struct {
+	Name              string
+	SID               string
+	DistinguishedName string
+}
+
+// DiscoveryResult holds the results of AD discovery for tabularium output
+type DiscoveryResult struct {
+	Domain    DomainInfo
+	Computers map[string]ComputerInfo // keyed by DNSHostName
+}
+
+// Tabularium output structures
+type TabulatoriumOutput struct {
+	Context TabulatoriumContext `json:"context"`
+	Items   []interface{}       `json:"items"`
+}
+
+type TabulatoriumContext struct {
+	Source string                 `json:"source"`
+	Target map[string]interface{} `json:"target"`
+}
+
+type TabulatoriumADDomain struct {
+	Type              string `json:"_type"`
+	Key               string `json:"key"`
+	Label             string `json:"label"`
+	Class             string `json:"class"`
+	Domain            string `json:"domain"`
+	ObjectID          string `json:"objectid"`
+	SID               string `json:"sid"`
+	DomainSID         string `json:"domainsid"`
+	DistinguishedName string `json:"distinguishedname"`
+}
+
+type TabulatoriumADComputer struct {
+	Type              string `json:"_type"`
+	Key               string `json:"key"`
+	Label             string `json:"label"`
+	Class             string `json:"class"`
+	Domain            string `json:"domain"`
+	ObjectID          string `json:"objectid"`
+	SID               string `json:"sid"`
+	DistinguishedName string `json:"distinguishedname"`
+	DNSHostName       string `json:"dnshostname"`
+}
+
+type TabulatoriumRisk struct {
+	Type     string                 `json:"_type"`
+	Key      string                 `json:"key"`
+	DNS      string                 `json:"dns"`
+	Name     string                 `json:"name"`
+	Status   string                 `json:"status"`
+	Source   string                 `json:"source"`
+	Priority int                    `json:"priority"`
+	Created  string                 `json:"created"`
+	Updated  string                 `json:"updated"`
+	Visited  string                 `json:"visited"`
+	Target   map[string]interface{} `json:"_target"`
+}
+
+type TabulatoriumFile struct {
+	Type  string `json:"_type"`
+	Key   string `json:"key"`
+	Path  string `json:"path"`
+	Bytes string `json:"bytes"`
+}
+
 // ScanResult holds the outcome of scanning a single target
 type ScanResult struct {
-	Host  string
-	Share string
-	Error error
+	Host        string
+	Share       string
+	Error       error
+	HasFindings bool   // Whether Noseyparker found any secrets
+	OutputPath  string // Path to the output file (for tabularium aggregation)
 }
 
 // Default file extensions to exclude (binaries, media, archives, etc.)
@@ -179,6 +261,30 @@ func main() {
 		fmt.Fprintln(os.Stderr, "[!] Warning: --output-format/-of is ignored in discovery-only mode (-nn)")
 	}
 
+	// Validate tabularium format only works in discovery mode
+	hasTabularium := false
+	for _, f := range config.OutputFormats {
+		if f == "tabularium" {
+			hasTabularium = true
+			break
+		}
+	}
+	if hasTabularium && !hasDiscovery {
+		fmt.Fprintln(os.Stderr, "Error: --output-format tabularium requires discovery mode (provide -d <domain> with credentials).")
+		flag.Usage()
+		os.Exit(1)
+	}
+	// Strip tabularium from formats if -nn is used (discovery-only mode)
+	if config.NoNoseyparker && hasTabularium {
+		var filtered []string
+		for _, f := range config.OutputFormats {
+			if f != "tabularium" {
+				filtered = append(filtered, f)
+			}
+		}
+		config.OutputFormats = filtered
+	}
+
 	// Validate/create output directory for batch mode
 	if isBatchMode && config.SaveOutput {
 		info, err := os.Stat(config.OutputFile)
@@ -199,11 +305,17 @@ func main() {
 	var targets []Target
 	if hasDiscovery {
 		var err error
-		targets, err = discoverTargets(config)
+		// Fetch SIDs if tabularium output is requested
+		fetchSIDs := hasTabularium && !config.NoNoseyparker
+		var discoveryResult *DiscoveryResult
+		targets, discoveryResult, err = discoverTargets(config, fetchSIDs)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error during discovery: %v\n", err)
 			os.Exit(1)
 		}
+		// Store discovery result for tabularium output
+		config.DiscoveryResult = discoveryResult
+
 		if len(targets) == 0 {
 			fmt.Fprintln(os.Stderr, "[*] No accessible shares discovered")
 			os.Exit(0)
@@ -248,11 +360,13 @@ func main() {
 				fmt.Sprintf("%s__%s.txt", sanitizeFilename(target.Host), sanitizeFilename(target.Share)))
 		}
 
-		err := scanTarget(targetConfig)
+		hasFindings, outputPath, err := scanTarget(targetConfig)
 		results = append(results, ScanResult{
-			Host:  target.Host,
-			Share: target.Share,
-			Error: err,
+			Host:        target.Host,
+			Share:       target.Share,
+			Error:       err,
+			HasFindings: hasFindings,
+			OutputPath:  outputPath,
 		})
 
 		if err != nil {
@@ -264,14 +378,22 @@ func main() {
 	if isBatchMode {
 		printSummary(results)
 	}
+
+	// Generate tabularium output if requested
+	if hasTabularium && config.DiscoveryResult != nil {
+		if err := generateTabulatoriumOutput(config, results); err != nil {
+			fmt.Fprintf(os.Stderr, "[-] Failed to generate tabularium output: %v\n", err)
+		}
+	}
 }
 
 // scanTarget performs the full scan workflow for a single host/share combination
-func scanTarget(config Config) error {
+// Returns: hasFindings (whether secrets were found), outputPath (path to output file if saved), error
+func scanTarget(config Config) (bool, string, error) {
 	// Create temporary mount point
 	mountPath, err := createMountPoint()
 	if err != nil {
-		return fmt.Errorf("failed to create mount point: %w", err)
+		return false, "", fmt.Errorf("failed to create mount point: %w", err)
 	}
 	config.MountPath = mountPath
 
@@ -297,19 +419,20 @@ func scanTarget(config Config) error {
 	// Mount the SMB share
 	if err := mountSMB(config); err != nil {
 		cleanup(config)
-		return fmt.Errorf("mount failed: %w", err)
+		return false, "", fmt.Errorf("mount failed: %w", err)
 	}
 	// Run noseyparker
 	fmt.Fprintln(os.Stderr, "[*] Running noseyparker scan...")
-	if err := runNoseyparker(config); err != nil {
+	hasFindings, err := runNoseyparker(config)
+	if err != nil {
 		cleanup(config)
-		return fmt.Errorf("scan failed: %w", err)
+		return false, "", fmt.Errorf("scan failed: %w", err)
 	}
 
 	// Cleanup
 	cleanup(config)
 	fmt.Fprintln(os.Stderr, "[+] Scan complete")
-	return nil
+	return hasFindings, config.OutputFile, nil
 }
 
 // parseTargetFile reads targets from a file, supporting both CSV and UNC path formats
@@ -420,6 +543,167 @@ func printSummary(results []ScanResult) {
 	}
 }
 
+// generateTabulatoriumOutput creates a tabularium-compatible JSON file for Guard platform ingestion
+func generateTabulatoriumOutput(config Config, results []ScanResult) error {
+	discovery := config.DiscoveryResult
+	if discovery == nil {
+		return fmt.Errorf("no discovery result available")
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	domainLower := strings.ToLower(config.Domain)
+
+	// Build domain object for context and items
+	domainObj := map[string]interface{}{
+		"_type":             "addomain",
+		"key":               fmt.Sprintf("#addomain#%s#%s", domainLower, discovery.Domain.SID),
+		"label":             "ADDomain",
+		"class":             "domain",
+		"domain":            domainLower,
+		"objectid":          discovery.Domain.SID,
+		"sid":               discovery.Domain.SID,
+		"domainsid":         discovery.Domain.SID,
+		"distinguishedname": discovery.Domain.DistinguishedName,
+	}
+
+	// Build context
+	output := TabulatoriumOutput{
+		Context: TabulatoriumContext{
+			Source: "smbellum",
+			Target: domainObj,
+		},
+		Items: []interface{}{},
+	}
+
+	// Add domain object to items
+	output.Items = append(output.Items, domainObj)
+
+	// Aggregate findings per host
+	// Map from hostname to list of results with findings
+	hostFindings := make(map[string][]ScanResult)
+	for _, r := range results {
+		if r.HasFindings {
+			hostFindings[r.Host] = append(hostFindings[r.Host], r)
+		}
+	}
+
+	// For each host with findings, create computer object, risk, and proof file
+	for host, hostResults := range hostFindings {
+		// Get computer info from discovery result
+		computerInfo, ok := discovery.Computers[host]
+		if !ok {
+			// Computer not found in discovery (shouldn't happen), skip
+			fmt.Fprintf(os.Stderr, "[!] Warning: Computer %s not found in discovery result, skipping tabularium entry\n", host)
+			continue
+		}
+
+		// Create computer object
+		computerObj := TabulatoriumADComputer{
+			Type:              "adcomputer",
+			Key:               fmt.Sprintf("#adcomputer#%s#%s", domainLower, computerInfo.SID),
+			Label:             "ADComputer",
+			Class:             "computer",
+			Domain:            domainLower,
+			ObjectID:          computerInfo.SID,
+			SID:               computerInfo.SID,
+			DistinguishedName: computerInfo.DistinguishedName,
+			DNSHostName:       strings.ToLower(computerInfo.DNSHostName),
+		}
+		output.Items = append(output.Items, computerObj)
+
+		// Aggregate proof content from all output files for this host
+		var proofContent strings.Builder
+		proofContent.WriteString(fmt.Sprintf("Host: %s\n", host))
+		proofContent.WriteString(fmt.Sprintf("Shares with findings: %d\n", len(hostResults)))
+		proofContent.WriteString("=" + strings.Repeat("=", 50) + "\n\n")
+
+		for _, r := range hostResults {
+			proofContent.WriteString(fmt.Sprintf("Share: %s\n", r.Share))
+			proofContent.WriteString("-" + strings.Repeat("-", 30) + "\n")
+
+			// Read the output file if it exists
+			if r.OutputPath != "" {
+				content, err := os.ReadFile(r.OutputPath)
+				if err == nil {
+					proofContent.Write(content)
+				} else {
+					proofContent.WriteString(fmt.Sprintf("[Could not read output file: %v]\n", err))
+				}
+			} else {
+				proofContent.WriteString("[No output file saved]\n")
+			}
+			proofContent.WriteString("\n")
+		}
+
+		// Create risk object
+		riskKey := fmt.Sprintf("#risk#%s#smb-exposed-secrets", domainLower)
+		riskTarget := map[string]interface{}{
+			"_type":       "adcomputer",
+			"key":         computerObj.Key,
+			"label":       "ADComputer",
+			"class":       "computer",
+			"domain":      domainLower,
+			"objectid":    computerInfo.SID,
+			"dnshostname": strings.ToLower(computerInfo.DNSHostName),
+		}
+
+		risk := TabulatoriumRisk{
+			Type:     "risk",
+			Key:      riskKey,
+			DNS:      domainLower,
+			Name:     "smb-exposed-secrets",
+			Status:   "TM", // Triage Medium
+			Source:   "smbellum:NOSEYPARKER",
+			Priority: 20, // Medium
+			Created:  now,
+			Updated:  now,
+			Visited:  now,
+			Target:   riskTarget,
+		}
+		output.Items = append(output.Items, risk)
+
+		// Create proof file
+		proofPath := fmt.Sprintf("proofs/%s/smb-exposed-secrets-%s", domainLower, sanitizeFilename(host))
+		proofFile := TabulatoriumFile{
+			Type:  "file",
+			Key:   fmt.Sprintf("#file#%s", proofPath),
+			Path:  proofPath,
+			Bytes: base64.StdEncoding.EncodeToString([]byte(proofContent.String())),
+		}
+		output.Items = append(output.Items, proofFile)
+	}
+
+	// Serialize to JSON
+	jsonData, err := json.MarshalIndent(output, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to serialize tabularium output: %w", err)
+	}
+
+	// Determine output path
+	filename := fmt.Sprintf("%s.tabularium", sanitizeFilename(config.Domain))
+	outputPath := filename
+	if config.OutputFile != "" {
+		// Check if OutputFile is a directory
+		if info, err := os.Stat(config.OutputFile); err == nil && info.IsDir() {
+			outputPath = filepath.Join(config.OutputFile, filename)
+		} else if strings.HasSuffix(config.OutputFile, "/") || strings.HasSuffix(config.OutputFile, string(os.PathSeparator)) {
+			// Intended to be a directory
+			if err := os.MkdirAll(config.OutputFile, 0755); err != nil {
+				return fmt.Errorf("failed to create output directory: %w", err)
+			}
+			outputPath = filepath.Join(config.OutputFile, filename)
+		}
+	}
+
+	// Write the file
+	if err := os.WriteFile(outputPath, jsonData, 0644); err != nil {
+		return fmt.Errorf("failed to write tabularium output: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "[+] Tabularium output written to %s\n", outputPath)
+	return nil
+}
+
 // outputDiscoveredShares outputs discovered shares in UNC format
 func outputDiscoveredShares(config Config, targets []Target) {
 	// Build output lines in UNC format
@@ -481,8 +765,38 @@ func domainToBaseDN(domain string) string {
 	return strings.Join(dnParts, ",")
 }
 
+// sidToString converts a binary SID to its string representation
+// SID format: S-R-I-S-S-S...
+// Where R=revision, I=identifier authority, S=sub-authorities
+func sidToString(sidBytes []byte) string {
+	if len(sidBytes) < 8 {
+		return ""
+	}
+
+	revision := sidBytes[0]
+	subAuthCount := int(sidBytes[1])
+
+	// Identifier authority is 6 bytes big-endian
+	var identAuth uint64
+	for i := 2; i < 8; i++ {
+		identAuth = (identAuth << 8) | uint64(sidBytes[i])
+	}
+
+	// Build SID string
+	sid := fmt.Sprintf("S-%d-%d", revision, identAuth)
+
+	// Sub-authorities are 4 bytes little-endian each
+	for i := 0; i < subAuthCount && 8+i*4+4 <= len(sidBytes); i++ {
+		subAuth := binary.LittleEndian.Uint32(sidBytes[8+i*4:])
+		sid += fmt.Sprintf("-%d", subAuth)
+	}
+
+	return sid
+}
+
 // discoverTargets orchestrates host and share discovery with parallel workers
-func discoverTargets(config Config) ([]Target, error) {
+// If fetchSIDs is true, also fetches SIDs for tabularium output
+func discoverTargets(config Config, fetchSIDs bool) ([]Target, *DiscoveryResult, error) {
 	// Step 1: Get list of domain controllers to try
 	var domainControllers []string
 
@@ -495,7 +809,7 @@ func discoverTargets(config Config) ([]Target, error) {
 		fmt.Fprintf(os.Stderr, "[*] Discovering domain controllers for %s...\n", config.Domain)
 		dcs, err := discoverDomainControllers(config.Domain, config.DNSServer)
 		if err != nil {
-			return nil, fmt.Errorf("could not auto-discover domain controller for %s: %w\n\nProvide a domain controller explicitly with -dc <hostname>\nor try a different DNS server with -dns <ip>", config.Domain, err)
+			return nil, nil, fmt.Errorf("could not auto-discover domain controller for %s: %w\n\nProvide a domain controller explicitly with -dc <hostname>\nor try a different DNS server with -dns <ip>", config.Domain, err)
 		}
 		domainControllers = dcs
 		fmt.Fprintf(os.Stderr, "[+] Discovered %d domain controller(s): %s\n", len(dcs), strings.Join(dcs, ", "))
@@ -503,14 +817,14 @@ func discoverTargets(config Config) ([]Target, error) {
 
 	// Step 2: Discover computers from AD
 	fmt.Fprintf(os.Stderr, "[*] Querying AD for computer objects...\n")
-	computers, err := discoverComputers(config, domainControllers)
+	computers, discoveryResult, err := discoverComputers(config, domainControllers, fetchSIDs)
 	if err != nil {
-		return nil, fmt.Errorf("failed to discover computers: %w", err)
+		return nil, nil, fmt.Errorf("failed to discover computers: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "[+] Found %d computers in AD\n", len(computers))
 
 	if len(computers) == 0 {
-		return nil, nil
+		return nil, discoveryResult, nil
 	}
 
 	// Step 2: Discover shares on each computer (parallel with 10 workers)
@@ -575,7 +889,7 @@ func discoverTargets(config Config) ([]Target, error) {
 	if failedHosts > 0 && !config.Verbose {
 		fmt.Fprintf(os.Stderr, "[*] %d hosts unreachable (use -v for details)\n", failedHosts)
 	}
-	return targets, nil
+	return targets, discoveryResult, nil
 }
 
 // discoverDomainControllers performs DNS SRV lookup to find domain controllers for a domain
@@ -687,7 +1001,8 @@ func connectToLDAP(dc string, config Config) (*ldap.Conn, error) {
 
 // discoverComputers queries AD via LDAP for all computer objects
 // It tries each domain controller in the list until one succeeds
-func discoverComputers(config Config, domainControllers []string) ([]string, error) {
+// Returns computer hostnames and optionally DiscoveryResult with SIDs for tabularium output
+func discoverComputers(config Config, domainControllers []string, fetchSIDs bool) ([]string, *DiscoveryResult, error) {
 	var l *ldap.Conn
 	var err error
 	var connectedDC string
@@ -703,7 +1018,7 @@ func discoverComputers(config Config, domainControllers []string) ([]string, err
 	}
 
 	if l == nil {
-		return nil, fmt.Errorf("failed to connect to any domain controller")
+		return nil, nil, fmt.Errorf("failed to connect to any domain controller")
 	}
 	defer l.Close()
 
@@ -718,9 +1033,38 @@ func discoverComputers(config Config, domainControllers []string) ([]string, err
 		fmt.Fprintf(os.Stderr, "[+] LDAP connection established to %s\n", connectedDC)
 	}
 
-	// Search for computer objects using paged search to handle large domains
-	// AD has a default limit of 1000 results per query
 	baseDN := domainToBaseDN(config.Domain)
+
+	// Initialize discovery result if fetching SIDs
+	var discoveryResult *DiscoveryResult
+	if fetchSIDs {
+		discoveryResult = &DiscoveryResult{
+			Computers: make(map[string]ComputerInfo),
+		}
+
+		// Fetch domain SID
+		domainSearchRequest := ldap.NewSearchRequest(
+			baseDN,
+			ldap.ScopeBaseObject, ldap.NeverDerefAliases, 0, 0, false,
+			"(objectClass=domain)",
+			[]string{"objectSid", "distinguishedName"},
+			nil,
+		)
+		domainResult, err := l.Search(domainSearchRequest)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to fetch domain SID: %w", err)
+		}
+		if len(domainResult.Entries) > 0 {
+			entry := domainResult.Entries[0]
+			sidBytes := entry.GetRawAttributeValue("objectSid")
+			discoveryResult.Domain = DomainInfo{
+				Name:              strings.ToLower(config.Domain),
+				SID:               sidToString(sidBytes),
+				DistinguishedName: entry.GetAttributeValue("distinguishedName"),
+			}
+			fmt.Fprintf(os.Stderr, "[+] Domain SID: %s\n", discoveryResult.Domain.SID)
+		}
+	}
 
 	// Calculate timestamp for 4 months ago in Windows FILETIME format
 	// FILETIME is 100-nanosecond intervals since January 1, 1601
@@ -735,18 +1079,24 @@ func discoverComputers(config Config, domainControllers []string) ([]string, err
 	// - lastLogonTimestamp>=X: only machines that logged in within last 4 months
 	ldapFilter := fmt.Sprintf("(&(objectClass=computer)(!(userAccountControl:1.2.840.113556.1.4.803:=2))(lastLogonTimestamp>=%d))", fileTime)
 
+	// Fetch additional attributes if we need SIDs
+	attributes := []string{"dNSHostName"}
+	if fetchSIDs {
+		attributes = append(attributes, "objectSid", "distinguishedName")
+	}
+
 	searchRequest := ldap.NewSearchRequest(
 		baseDN,
 		ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
 		ldapFilter,
-		[]string{"dNSHostName"},
+		attributes,
 		nil,
 	)
 
 	// Use paged search with 500 entries per page to avoid size limit errors
 	sr, err := l.SearchWithPaging(searchRequest, 500)
 	if err != nil {
-		return nil, fmt.Errorf("LDAP search failed: %w", err)
+		return nil, nil, fmt.Errorf("LDAP search failed: %w", err)
 	}
 
 	var computers []string
@@ -754,10 +1104,20 @@ func discoverComputers(config Config, domainControllers []string) ([]string, err
 		dnsHostName := entry.GetAttributeValue("dNSHostName")
 		if dnsHostName != "" {
 			computers = append(computers, dnsHostName)
+
+			// Store computer info if fetching SIDs
+			if fetchSIDs && discoveryResult != nil {
+				sidBytes := entry.GetRawAttributeValue("objectSid")
+				discoveryResult.Computers[dnsHostName] = ComputerInfo{
+					DNSHostName:       dnsHostName,
+					SID:               sidToString(sidBytes),
+					DistinguishedName: entry.GetAttributeValue("distinguishedName"),
+				}
+			}
 		}
 	}
 
-	return computers, nil
+	return computers, discoveryResult, nil
 }
 
 // discoverSharesOnHost enumerates SMB shares on a host and returns those with read access
@@ -888,7 +1248,7 @@ func parseArgs() Config {
 	flag.StringVar(&excludedShares, "xs", "", "Share names to exclude during discovery (shorthand)")
 
 	// Output options (note: -o is handled manually after flag.Parse for optional argument support)
-	flag.StringVar(&outputFormats, "output-format", "", "Output formats to save (comma-separated: txt,json,jsonl,sarif)")
+	flag.StringVar(&outputFormats, "output-format", "", "Output formats to save (comma-separated: txt,json,jsonl,sarif,tabularium)")
 	flag.StringVar(&outputFormats, "of", "", "Output formats to save (shorthand)")
 	flag.BoolVar(&config.Verbose, "verbose", false, "Verbose output (show excluded files)")
 	flag.BoolVar(&config.Verbose, "v", false, "Verbose output (shorthand)")
@@ -928,7 +1288,7 @@ func parseArgs() Config {
 		fmt.Fprintln(os.Stderr, "\nOutput:")
 		fmt.Fprintln(os.Stderr, "  -o <path>           Single target: output file (default: <host>_<share>.txt)")
 		fmt.Fprintln(os.Stderr, "                      Batch mode: output directory (must exist)")
-		fmt.Fprintln(os.Stderr, "  --output-format, -of  Output formats to save (comma-separated: txt,json,jsonl,sarif)")
+		fmt.Fprintln(os.Stderr, "  --output-format, -of  Output formats to save (comma-separated: txt,json,jsonl,sarif,tabularium)")
 		fmt.Fprintln(os.Stderr, "                        Default: txt. Requires -o flag.")
 		fmt.Fprintln(os.Stderr, "  -v                  Verbose output (show excluded files)")
 		fmt.Fprintln(os.Stderr, "\nBuilt-in Exclusions (enabled by default):")
@@ -1011,7 +1371,7 @@ func parseArgs() Config {
 	}
 
 	// Parse output formats
-	validFormats := map[string]bool{"txt": true, "json": true, "jsonl": true, "sarif": true}
+	validFormats := map[string]bool{"txt": true, "json": true, "jsonl": true, "sarif": true, "tabularium": true}
 	if outputFormats != "" {
 		for _, format := range strings.Split(outputFormats, ",") {
 			format = strings.TrimSpace(strings.ToLower(format))
@@ -1314,111 +1674,7 @@ func buildIgnorePatterns(config Config) []string {
 	return patterns
 }
 
-func getExcludedExtensions(config Config) []string {
-	var exts []string
-	if !config.NoExclusion {
-		exts = append(exts, defaultExcludedExtensions...)
-	}
-	exts = append(exts, config.AdditionalExts...)
-	return exts
-}
-
-func getExcludedFolders(config Config) []string {
-	var folders []string
-	if !config.NoExclusion {
-		folders = append(folders, defaultExcludedFolders...)
-	}
-	folders = append(folders, config.AdditionalFolders...)
-	return folders
-}
-
-func matchesExtension(filename string, extensions []string) (bool, string) {
-	ext := strings.TrimPrefix(filepath.Ext(filename), ".")
-	if ext == "" {
-		return false, ""
-	}
-	for _, pattern := range extensions {
-		re, err := regexp.Compile("(?i)^" + pattern + "$") // case-insensitive, full match
-		if err != nil {
-			// If invalid regex, fall back to literal match
-			if strings.EqualFold(ext, pattern) {
-				return true, fmt.Sprintf("**/*.%s", pattern)
-			}
-			continue
-		}
-		if re.MatchString(ext) {
-			return true, fmt.Sprintf("**/*.%s", pattern)
-		}
-	}
-	return false, ""
-}
-
-func containsExcludedFolder(path string, folders []string) (bool, string) {
-	pathParts := strings.Split(filepath.ToSlash(path), "/")
-	for _, part := range pathParts {
-		for _, pattern := range folders {
-			re, err := regexp.Compile("(?i)^" + pattern + "$") // case-insensitive, full match
-			if err != nil {
-				// If invalid regex, fall back to literal match
-				if strings.EqualFold(part, pattern) {
-					return true, fmt.Sprintf("**/%s/**", pattern)
-				}
-				continue
-			}
-			if re.MatchString(part) {
-				return true, fmt.Sprintf("**/%s/**", pattern)
-			}
-		}
-	}
-	return false, ""
-}
-
-func reportExclusions(scanPath string, config Config) {
-	if !config.Verbose {
-		return
-	}
-
-	excludedExts := getExcludedExtensions(config)
-	excludedFolders := getExcludedFolders(config)
-
-	if len(excludedExts) == 0 && len(excludedFolders) == 0 {
-		return
-	}
-
-	filepath.Walk(scanPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil // Skip files we can't access
-		}
-
-		// Get relative path for cleaner output
-		relPath, _ := filepath.Rel(scanPath, path)
-		if relPath == "." {
-			return nil
-		}
-
-		// Check folder exclusions first
-		if matched, rule := containsExcludedFolder(relPath, excludedFolders); matched {
-			timestamp := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
-			fmt.Fprintf(os.Stderr, "%s  WARN exclusion: Skipping entry: %s (matched rule: %s)\n", timestamp, relPath, rule)
-			if info.IsDir() {
-				return filepath.SkipDir // Skip entire directory
-			}
-			return nil
-		}
-
-		// Check file extension exclusions
-		if !info.IsDir() {
-			if matched, rule := matchesExtension(info.Name(), excludedExts); matched {
-				timestamp := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
-				fmt.Fprintf(os.Stderr, "%s  WARN exclusion: Skipping entry: %s (matched rule: %s)\n", timestamp, relPath, rule)
-			}
-		}
-
-		return nil
-	})
-}
-
-func runNoseyparker(config Config) error {
+func runNoseyparker(config Config) (bool, error) {
 	var scanPath string
 
 	if runtime.GOOS == "windows" {
@@ -1430,7 +1686,7 @@ func runNoseyparker(config Config) error {
 	// Create a temporary datastore for noseyparker
 	datastorePath, err := os.MkdirTemp("", "np-datastore-*")
 	if err != nil {
-		return fmt.Errorf("failed to create datastore directory: %w", err)
+		return false, fmt.Errorf("failed to create datastore directory: %w", err)
 	}
 	defer os.RemoveAll(datastorePath)
 
@@ -1444,7 +1700,7 @@ func runNoseyparker(config Config) error {
 	if len(ignorePatterns) > 0 {
 		tmpIgnore, err := os.CreateTemp("", "noseyparker-ignore-*")
 		if err != nil {
-			return fmt.Errorf("failed to create ignore file: %w", err)
+			return false, fmt.Errorf("failed to create ignore file: %w", err)
 		}
 		ignoreFile = tmpIgnore.Name()
 		defer os.Remove(ignoreFile)
@@ -1453,7 +1709,7 @@ func runNoseyparker(config Config) error {
 		for _, pattern := range ignorePatterns {
 			if _, err := tmpIgnore.WriteString(pattern + "\n"); err != nil {
 				tmpIgnore.Close()
-				return fmt.Errorf("failed to write ignore patterns: %w", err)
+				return false, fmt.Errorf("failed to write ignore patterns: %w", err)
 			}
 		}
 		tmpIgnore.Close()
@@ -1473,12 +1729,9 @@ func runNoseyparker(config Config) error {
 			len(config.AdditionalExts), len(config.AdditionalFolders))
 	}
 
-	// Report all excluded files
-	reportExclusions(scanPath, config)
-
 	// Run noseyparker scan
 	if err := runNoseyparkerScan(config, scanPath, datastorePath, datastore, ignoreFile); err != nil {
-		return err
+		return false, err
 	}
 
 	// Check for findings
@@ -1491,15 +1744,15 @@ func runNoseyparker(config Config) error {
 
 	if !hasFindings {
 		fmt.Fprintln(os.Stderr, "[*] No secrets discovered in this share.")
-		return nil
+		return false, nil
 	}
 
 	// Run noseyparker report to stdout (and optionally to file(s))
 	if err := runNoseyparkerReport(config, datastorePath, datastore); err != nil {
-		return err
+		return false, err
 	}
 
-	return nil
+	return true, nil
 }
 
 func runNoseyparkerScan(config Config, scanPath, datastorePath, datastore, ignoreFile string) error {
@@ -1658,7 +1911,13 @@ func runNoseyparkerReport(config Config, datastorePath, datastore string) error 
 	// If output file is specified, generate files for each requested format
 	if config.SaveOutput && config.OutputFile != "" {
 		// Default to txt if no formats specified
-		formats := config.OutputFormats
+		// Filter out tabularium - it's handled separately by SMBellum, not Noseyparker
+		var formats []string
+		for _, f := range config.OutputFormats {
+			if f != "tabularium" {
+				formats = append(formats, f)
+			}
+		}
 		if len(formats) == 0 {
 			formats = []string{"txt"}
 		}

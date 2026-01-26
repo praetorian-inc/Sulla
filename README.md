@@ -182,7 +182,7 @@ smbellum -h fileserver.corp.local -s SYSVOL -u admin -p secret123 -d corp.local
 | Flag | Description |
 |------|-------------|
 | `--output [path]`, `-o [path]` | Save report output. Single target: filename (default: `{host}__{share}.txt`). Batch mode: directory |
-| `--output-format`, `-of` | Output formats to save (comma-separated: `txt`, `json`, `jsonl`, `sarif`). Default: `txt` |
+| `--output-format`, `-of` | Output formats to save (comma-separated: `txt`, `json`, `jsonl`, `sarif`, `tabularium`). Default: `txt` |
 | `--verbose`, `-v` | Verbose output (show excluded files, unreachable hosts) |
 
 ## Default Exclusions
@@ -208,6 +208,7 @@ Use `--show-default-exclusions` to see the complete list, or `--no-default-exclu
 | `json` | JSON format for programmatic processing |
 | `jsonl` | JSON Lines format (one finding per line) |
 | `sarif` | SARIF format for integration with security tools |
+| `tabularium` | [Tabularium](https://github.com/praetorian-inc/tabularium) format (discovery mode only) |
 
 
 ## Notes
