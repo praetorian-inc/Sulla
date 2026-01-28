@@ -635,8 +635,9 @@ func generateTabulatoriumOutput(config Config, results []ScanResult) error {
 			proofContent.WriteString("\n")
 		}
 
-		// Create risk object
-		riskKey := fmt.Sprintf("#risk#%s#smb-exposed-secrets", domainLower)
+		// Create risk object - use host (not domain) for unique risk per host
+		hostLower := strings.ToLower(host)
+		riskKey := fmt.Sprintf("#risk#%s#smb-exposed-secrets", hostLower)
 		riskTarget := map[string]interface{}{
 			"_type":       "adcomputer",
 			"key":         computerObj.Key,
@@ -650,7 +651,7 @@ func generateTabulatoriumOutput(config Config, results []ScanResult) error {
 		risk := TabulatoriumRisk{
 			Type:     "risk",
 			Key:      riskKey,
-			DNS:      domainLower,
+			DNS:      hostLower,
 			Name:     "smb-exposed-secrets",
 			Status:   "TM", // Triage Medium
 			Source:   "smbellum:NOSEYPARKER",
@@ -662,8 +663,8 @@ func generateTabulatoriumOutput(config Config, results []ScanResult) error {
 		}
 		output.Items = append(output.Items, risk)
 
-		// Create proof file
-		proofPath := fmt.Sprintf("proofs/%s/smb-exposed-secrets-%s", domainLower, sanitizeFilename(host))
+		// Create proof file - path must match risk dns/name for evidence linkage
+		proofPath := fmt.Sprintf("proofs/%s/smb-exposed-secrets", hostLower)
 		proofFile := TabulatoriumFile{
 			Type:  "file",
 			Key:   fmt.Sprintf("#file#%s", proofPath),
