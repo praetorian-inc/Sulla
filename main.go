@@ -80,17 +80,17 @@ type DiscoveryResult struct {
 }
 
 // Tabularium output structures
-type TabulatoriumOutput struct {
-	Context TabulatoriumContext `json:"context"`
+type TabulariumOutput struct {
+	Context TabulariumContext `json:"context"`
 	Items   []interface{}       `json:"items"`
 }
 
-type TabulatoriumContext struct {
+type TabulariumContext struct {
 	Source string                 `json:"source"`
 	Target map[string]interface{} `json:"target"`
 }
 
-type TabulatoriumADDomain struct {
+type TabulariumADDomain struct {
 	Type              string `json:"_type"`
 	Key               string `json:"key"`
 	Label             string `json:"label"`
@@ -102,7 +102,7 @@ type TabulatoriumADDomain struct {
 	DistinguishedName string `json:"distinguishedname"`
 }
 
-type TabulatoriumADComputer struct {
+type TabulariumADComputer struct {
 	Type              string `json:"_type"`
 	Key               string `json:"key"`
 	Label             string `json:"label"`
@@ -114,7 +114,7 @@ type TabulatoriumADComputer struct {
 	DNSHostName       string `json:"dnshostname"`
 }
 
-type TabulatoriumRisk struct {
+type TabulariumRisk struct {
 	Type     string                 `json:"_type"`
 	Key      string                 `json:"key"`
 	DNS      string                 `json:"dns"`
@@ -128,10 +128,10 @@ type TabulatoriumRisk struct {
 	Target   map[string]interface{} `json:"_target"`
 }
 
-type TabulatoriumFile struct {
+type TabulariumFile struct {
 	Type  string `json:"_type"`
 	Key   string `json:"key"`
-	Path  string `json:"path"`
+	Name  string `json:"name"`
 	Bytes string `json:"bytes"`
 }
 
@@ -381,7 +381,7 @@ func main() {
 
 	// Generate tabularium output if requested
 	if hasTabularium && config.DiscoveryResult != nil {
-		if err := generateTabulatoriumOutput(config, results); err != nil {
+		if err := generateTabulariumOutput(config, results); err != nil {
 			fmt.Fprintf(os.Stderr, "[-] Failed to generate tabularium output: %v\n", err)
 		}
 	}
@@ -543,8 +543,8 @@ func printSummary(results []ScanResult) {
 	}
 }
 
-// generateTabulatoriumOutput creates a tabularium-compatible JSON file for Guard platform ingestion
-func generateTabulatoriumOutput(config Config, results []ScanResult) error {
+// generateTabulariumOutput creates a tabularium-compatible JSON file for Guard platform ingestion
+func generateTabulariumOutput(config Config, results []ScanResult) error {
 	discovery := config.DiscoveryResult
 	if discovery == nil {
 		return fmt.Errorf("no discovery result available")
@@ -567,8 +567,8 @@ func generateTabulatoriumOutput(config Config, results []ScanResult) error {
 	}
 
 	// Build context
-	output := TabulatoriumOutput{
-		Context: TabulatoriumContext{
+	output := TabulariumOutput{
+		Context: TabulariumContext{
 			Source: "smbellum",
 			Target: domainObj,
 		},
@@ -598,7 +598,7 @@ func generateTabulatoriumOutput(config Config, results []ScanResult) error {
 		}
 
 		// Create computer object
-		computerObj := TabulatoriumADComputer{
+		computerObj := TabulariumADComputer{
 			Type:              "adcomputer",
 			Key:               fmt.Sprintf("#adcomputer#%s#%s", domainLower, computerInfo.SID),
 			Label:             "ADComputer",
@@ -648,7 +648,7 @@ func generateTabulatoriumOutput(config Config, results []ScanResult) error {
 			"dnshostname": strings.ToLower(computerInfo.DNSHostName),
 		}
 
-		risk := TabulatoriumRisk{
+		risk := TabulariumRisk{
 			Type:     "risk",
 			Key:      riskKey,
 			DNS:      hostLower,
@@ -663,12 +663,12 @@ func generateTabulatoriumOutput(config Config, results []ScanResult) error {
 		}
 		output.Items = append(output.Items, risk)
 
-		// Create proof file - path must match risk dns/name for evidence linkage
-		proofPath := fmt.Sprintf("proofs/%s/smb-exposed-secrets", hostLower)
-		proofFile := TabulatoriumFile{
+		// Create proof file - name must match risk dns/name for evidence linkage
+		proofName := fmt.Sprintf("proofs/%s/smb-exposed-secrets", hostLower)
+		proofFile := TabulariumFile{
 			Type:  "file",
-			Key:   fmt.Sprintf("#file#%s", proofPath),
-			Path:  proofPath,
+			Key:   fmt.Sprintf("#file#%s", proofName),
+			Name:  proofName,
 			Bytes: base64.StdEncoding.EncodeToString([]byte(proofContent.String())),
 		}
 		output.Items = append(output.Items, proofFile)
