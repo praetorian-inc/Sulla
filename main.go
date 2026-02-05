@@ -669,7 +669,7 @@ func generateTabulariumOutput(config Config, results []ScanResult) error {
 			Type:  "file",
 			Key:   fmt.Sprintf("#file#%s", proofName),
 			Name:  proofName,
-			Bytes: base64.StdEncoding.EncodeToString([]byte(proofContent.String())),
+			Bytes: "base64:" + base64.StdEncoding.EncodeToString([]byte(proofContent.String())),
 		}
 		output.Items = append(output.Items, proofFile)
 	}
