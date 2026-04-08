@@ -1,10 +1,11 @@
 # Build stage
-FROM --platform=linux/amd64 debian:bookworm AS builder
+FROM debian:bookworm AS builder
 
-# Install Go 1.23.6 and build dependencies
+# Install Go, git, and build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     ca-certificates \
+    git \
     libhyperscan-dev \
     pkg-config \
     gcc \
@@ -20,11 +21,12 @@ ENV PATH="/usr/local/go/bin:${PATH}"
 
 WORKDIR /build
 
-# Copy titus module (required by replace directive: github.com/praetorian-inc/titus => ../titus)
-COPY titus/ /build/titus/
+# Clone titus (required by replace directive in go.mod)
+# TODO: switch to tagged release once praetorian-inc/titus#164 is merged
+RUN git clone --depth 1 --branch feature/smbellum-support https://github.com/praetorian-inc/titus.git /build/titus
 
 # Copy SMBellum source
-COPY SMBellum/ /build/SMBellum/
+COPY . /build/SMBellum/
 
 WORKDIR /build/SMBellum
 
@@ -33,7 +35,7 @@ RUN CGO_ENABLED=1 go build -tags vectorscan \
     -o /smbellum .
 
 # Runtime stage
-FROM --platform=linux/amd64 debian:bookworm-slim
+FROM debian:bookworm-slim
 
 COPY --from=builder /smbellum /smbellum
 
