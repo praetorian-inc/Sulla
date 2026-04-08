@@ -6,7 +6,7 @@
 
 ***
 
-A command-line tool to scan SMB shares for sensitive data using [Noseyparker](https://github.com/praetorian-inc/noseyparker).
+A command-line tool to scan SMB shares for sensitive data using [Titus](https://github.com/praetorian-inc/titus).
 
 You can:
 * Automatically discover and scan SMB shares on AD-joined hosts
@@ -19,24 +19,11 @@ You can:
 
 ## Requirements
 
-- [Noseyparker](https://github.com/praetorian-inc/noseyparker) must be installed (or available via Docker)
-- `cifs-utils`, typically installed on Linux by default
+- Titus is built into the SMBellum binary — no external dependencies required
 
 ## Installation
-Ensure `cifs-utils` is installed:
 
-```bash
-# Using apt
-sudo apt install cifs-utils -y
-```
-
-Install Noseyparker if not already installed. To install via Docker:
-
-```bash
-docker pull ghcr.io/praetorian-inc/noseyparker:latest
-```
-
-Next, download the appropriate SMBellum binary for your platform from [Releases](https://github.com/praetorian-inc/SMBellum/releases):
+Download the appropriate SMBellum binary for your platform from [Releases](https://github.com/praetorian-inc/SMBellum/releases):
 ```bash
 # Linux x86_64
 wget -O smbellum https://github.com/praetorian-inc/SMBellum/releases/latest/download/smbellum-linux-amd64
@@ -97,11 +84,11 @@ smbellum -u admin -p secret123 -d corp.local -o results/ -of txt,json
 
 ### Discovery-Only Mode
 
-Discover accessible shares without running Noseyparker scans. Outputs UNC paths that can be reviewed, filtered, and later used with `--target-file`:
+Discover accessible shares without running Titus scans. Outputs UNC paths that can be reviewed, filtered, and later used with `--target-file`:
 
 ```bash
 # Discover reachable shares without secret scanning
-smbellum -u admin -p secret123 -d corp.local -nn -o
+smbellum -u admin -p secret123 -d corp.local -do -o
 
 # Later, use discovered shares as target file input:
 smbellum -tf corp_local_discovered_smb_shares.txt -u admin -p secret123 -d corp.local
@@ -165,7 +152,7 @@ smbellum -h fileserver.corp.local -s SYSVOL -u admin -p secret123 -d corp.local
 | `--ldaps` | Use LDAPS (port 636) instead of LDAP (port 389) |
 | `--channel-binding` | Enable LDAP channel binding (requires `--ldaps`) |
 | `--dns-server`, `-dns` | Custom DNS server IP for hostname resolution |
-| `--no-noseyparker`, `-nn` | Discovery only: output shares in UNC format without scanning |
+| `--discovery-only`, `-do` | Discovery only: output shares in UNC format without scanning |
 
 ### Filtering
 
@@ -213,8 +200,6 @@ Use `--show-default-exclusions` to see the complete list, or `--no-default-exclu
 
 ## Notes
 
-- Mounting SMB shares may require `sudo` privileges
-- Shares are mounted read-only for safety
-- Automatically cleans up mounts on completion or interruption (Ctrl+C)
 - Discovery mode filters out disabled AD accounts and machines inactive for >4 months, a la [Snaffler](https://github.com/SnaffCon/Snaffler)
 - Only shares with read access are reported during discovery
+- Secret scanning is powered by [Titus](https://github.com/praetorian-inc/titus), a Go port of NoseyParker — no external binary required
