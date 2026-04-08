@@ -1,5 +1,5 @@
-# Build stage
-FROM debian:bookworm AS builder
+# Build stage — amd64 only (Hyperscan/Vectorscan requires x86)
+FROM --platform=linux/amd64 debian:bookworm AS builder
 
 # Install Go, git, and build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -35,7 +35,7 @@ RUN CGO_ENABLED=1 go build -tags vectorscan \
     -o /smbellum .
 
 # Runtime stage
-FROM debian:bookworm-slim
+FROM --platform=linux/amd64 debian:bookworm-slim
 
 COPY --from=builder /smbellum /smbellum
 
