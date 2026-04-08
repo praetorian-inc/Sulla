@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bufio"
 	"context"
 	"crypto/tls"
@@ -206,6 +207,29 @@ func (st *shareTracker) stop() {
 	close(st.stopCh)
 }
 
+// outputFileTracker collects paths of files created by smbellum for zip packaging.
+type outputFileTracker struct {
+	mu    sync.Mutex
+	paths []string
+}
+
+func (t *outputFileTracker) add(path string) {
+	t.mu.Lock()
+	t.paths = append(t.paths, path)
+	t.mu.Unlock()
+}
+
+func (t *outputFileTracker) list() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]string, len(t.paths))
+	copy(out, t.paths)
+	return out
+}
+
+// createdFiles tracks all output files smbellum writes, for --zip packaging.
+var createdFiles = &outputFileTracker{}
+
 type Config struct {
 	Host               string
 	Share              string
@@ -236,6 +260,7 @@ type Config struct {
 	MaxShareTime       int              // Maximum time per share in minutes (0 = indefinite, default 45)
 	MaxFilesPerDir     int              // Maximum files to scan per directory (0 = unlimited)
 	QuickMode          bool             // Quick mode: only scan high-value file types
+	ZipOutput          bool             // Zip txt/json output files into a single archive, then delete originals
 	TargetNum          int              // Current target number (1-based, for progress display)
 	TotalTargets       int              // Total number of targets (for progress display)
 	// Pre-computed exclusions (built once, shared across all targets)
@@ -866,6 +891,11 @@ func main() {
 		// Discovery-only mode: output shares and exit
 		if config.DiscoveryOnly {
 			outputDiscoveredShares(config, targets)
+			if config.ZipOutput {
+				if err := zipOutputFiles(config); err != nil {
+					logf("[-] Failed to zip output files: %v\n", err)
+				}
+			}
 			os.Exit(0)
 		}
 
@@ -987,6 +1017,13 @@ func main() {
 	if hasTabularium && config.DiscoveryResult != nil {
 		if err := generateTabulariumOutput(config, results); err != nil {
 			logf("[-] Failed to generate tabularium output: %v\n", err)
+		}
+	}
+
+	// Zip output files if requested
+	if config.ZipOutput {
+		if err := zipOutputFiles(config); err != nil {
+			logf("[-] Failed to zip output files: %v\n", err)
 		}
 	}
 }
@@ -1412,6 +1449,82 @@ func generateTabulariumOutput(config Config, results []ScanResult) error {
 	return nil
 }
 
+// zipOutputFiles collects the tracked txt/json output files into a single zip
+// archive, then removes the originals. The zip is named to match the tabularium
+// convention: {sanitized_domain_or_host__share}.zip and placed in the same
+// directory as the output files.
+func zipOutputFiles(config Config) error {
+	// Filter tracked files to only .txt and .json
+	var toZip []string
+	for _, p := range createdFiles.list() {
+		ext := strings.ToLower(filepath.Ext(p))
+		if ext == ".txt" || ext == ".json" {
+			toZip = append(toZip, p)
+		}
+	}
+	if len(toZip) == 0 {
+		return nil
+	}
+
+	// Determine zip filename using tabularium naming convention
+	var zipBase string
+	if config.Domain != "" {
+		zipBase = sanitizeFilename(config.Domain)
+	} else {
+		zipBase = sanitizeFilename(config.Host) + "__" + sanitizeFilename(config.Share)
+	}
+
+	// Determine output directory (same as where tabularium would be placed)
+	zipDir := "."
+	if config.OutputFile != "" {
+		if info, err := os.Stat(config.OutputFile); err == nil && info.IsDir() {
+			zipDir = config.OutputFile
+		} else {
+			zipDir = filepath.Dir(config.OutputFile)
+		}
+	}
+
+	zipPath := filepath.Join(zipDir, zipBase+".zip")
+
+	zf, err := os.Create(zipPath)
+	if err != nil {
+		return fmt.Errorf("failed to create zip file %s: %w", zipPath, err)
+	}
+	defer zf.Close()
+
+	zw := zip.NewWriter(zf)
+	defer zw.Close()
+
+	for _, path := range toZip {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("failed to read %s for zipping: %w", path, err)
+		}
+		fw, err := zw.Create(filepath.Base(path))
+		if err != nil {
+			return fmt.Errorf("failed to add %s to zip: %w", path, err)
+		}
+		if _, err := fw.Write(data); err != nil {
+			return fmt.Errorf("failed to write %s to zip: %w", path, err)
+		}
+	}
+
+	// Close the zip writer before deleting originals to ensure the archive is valid
+	if err := zw.Close(); err != nil {
+		return fmt.Errorf("failed to finalize zip: %w", err)
+	}
+
+	// Delete originals
+	for _, path := range toZip {
+		if err := os.Remove(path); err != nil {
+			logf("[!] Warning: failed to remove %s after zipping: %v\n", path, err)
+		}
+	}
+
+	logf("[+] Output archived to %s (%d files)\n", zipPath, len(toZip))
+	return nil
+}
+
 // outputDiscoveredShares outputs discovered shares in UNC format
 func outputDiscoveredShares(config Config, targets []Target) {
 	// Build output lines in UNC format
@@ -1459,6 +1572,7 @@ func outputDiscoveredShares(config Config, targets []Target) {
 			logf("Error: Failed to write output file: %s\n", err)
 			os.Exit(1)
 		}
+		createdFiles.add(outputPath)
 		logf("[+] Discovered shares written to %s\n", outputPath)
 	} else {
 		// Output to stdout
@@ -2465,6 +2579,8 @@ func parseArgs() Config {
 	flag.IntVar(&config.MaxFilesPerDir, "mf", 0, "Maximum files to scan per directory (shorthand)")
 	flag.BoolVar(&config.QuickMode, "quick", false, "Quick mode: only scan high-value file types")
 	flag.BoolVar(&config.QuickMode, "q", false, "Quick mode (shorthand)")
+	flag.BoolVar(&config.ZipOutput, "zip", false, "Zip txt/json output files into a single archive and delete originals")
+	flag.BoolVar(&config.ZipOutput, "z", false, "Zip txt/json output files (shorthand)")
 
 	// Concurrency options
 	flag.IntVar(&config.ShareWorkers, "share-workers", 60, "Number of parallel share workers")
@@ -2502,6 +2618,7 @@ func parseArgs() Config {
 		logln("                      Batch mode: output directory (must exist)")
 		logln("  --output-format, -of  Output formats to save (comma-separated: txt,json,jsonl,sarif,tabularium)")
 		logln("                        Default: txt. Requires -o flag.")
+		logln("  --zip, -z           Zip all txt/json output files and delete originals. Requires -o flag.")
 		logln("  -v                  Verbose output (show excluded files)")
 		logln("\nScanning:")
 		logln("  --quick, -q              Quick mode: high-value files only, depth 5, 15 min/share")
@@ -2656,6 +2773,13 @@ func parseArgs() Config {
 				config.OutputFile = filepath.Join(config.OutputFile, generateOutputFilename(config.Host, config.Share))
 			}
 		}
+	}
+
+	// Validate --zip requires -o
+	if config.ZipOutput && !config.SaveOutput {
+		logln("Error: --zip/-z requires the -o flag to specify an output path.")
+		flag.Usage()
+		os.Exit(1)
 	}
 
 	// Activate timestamps after arg validation / help text is done
@@ -3260,6 +3384,7 @@ func outputTitusResults(config Config, matches []fileMatch) error {
 			if err := outputTitusToFile(matches, format, outputPath); err != nil {
 				return err
 			}
+			createdFiles.add(outputPath)
 			logf("[+] Report saved to %s\n", outputPath)
 		}
 	}
