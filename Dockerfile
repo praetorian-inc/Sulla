@@ -1,23 +1,40 @@
-# Stage 1: Build SMBellum
-FROM golang:1.23-alpine AS builder
-WORKDIR /build
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o smbellum .
+# Build stage
+FROM --platform=linux/amd64 debian:bookworm AS builder
 
-# Stage 2: Get Noseyparker from official image
-FROM ghcr.io/praetorian-inc/noseyparker:latest AS noseyparker
-
-# Stage 3: Final image
-FROM debian:bookworm-slim
-
+# Install Go 1.23.6 and build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    cifs-utils \
+    wget \
     ca-certificates \
+    libhyperscan-dev \
+    pkg-config \
+    gcc \
+    g++ \
+    libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /build/smbellum /usr/local/bin/
-COPY --from=noseyparker /usr/local/bin/noseyparker /usr/local/bin/
+RUN wget -q https://go.dev/dl/go1.25.3.linux-amd64.tar.gz \
+    && tar -C /usr/local -xzf go1.25.3.linux-amd64.tar.gz \
+    && rm go1.25.3.linux-amd64.tar.gz
 
-ENTRYPOINT ["smbellum"]
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+WORKDIR /build
+
+# Copy titus module (required by replace directive: github.com/praetorian-inc/titus => ../titus)
+COPY titus/ /build/titus/
+
+# Copy SMBellum source
+COPY SMBellum/ /build/SMBellum/
+
+WORKDIR /build/SMBellum
+
+RUN CGO_ENABLED=1 go build -tags vectorscan \
+    -ldflags '-s -w -extldflags "-static"' \
+    -o /smbellum .
+
+# Runtime stage
+FROM --platform=linux/amd64 debian:bookworm-slim
+
+COPY --from=builder /smbellum /smbellum
+
+ENTRYPOINT ["/smbellum"]
