@@ -163,6 +163,9 @@ smbellum -h fileserver.corp.local -s SYSVOL -u admin -p secret123 -d corp.local
 | `--exclude-extensions`, `-xe` | Additional file extensions to exclude (comma-separated, supports regex) |
 | `--exclude-directories`, `-xd` | Additional directories to exclude (comma-separated, supports regex) |
 | `--exclude-shares`, `-xs` | Share names to exclude during discovery (comma-separated, supports regex) |
+| `--keywords`, `-kw` | Filename substrings to always include in scanning, overriding exclusions (comma-separated) |
+
+Custom exclusions are always additive to the defaults. Use `--no-default-exclusions` to start from a clean slate.
 
 ### Output
 

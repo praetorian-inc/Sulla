@@ -260,6 +260,8 @@ type Config struct {
 	MaxShareTime       int              // Maximum time per share in minutes (0 = indefinite, default 45)
 	MaxFilesPerDir     int              // Maximum files to scan per directory (0 = unlimited)
 	QuickMode          bool             // Quick mode: only scan high-value file types
+	Keywords           []string         // Additional filename substrings to always include in scanning
+	InterestingExcl    bool             // Write interesting exclusions (keyword/quick match but skipped) to CSV (on when -o is set)
 	ZipOutput          bool             // Zip txt/json output files into a single archive, then delete originals
 	TargetNum          int              // Current target number (1-based, for progress display)
 	TotalTargets       int              // Total number of targets (for progress display)
@@ -665,6 +667,7 @@ var quickModeContainsFilenames = []string{
 	"terraform.tfvars", ".tfstate",
 	"appsettings", "connection", "datasource",
 	".env",
+	"credentials", "password", "secret",
 }
 
 var quickModeExtensions = map[string]bool{
@@ -1454,11 +1457,11 @@ func generateTabulariumOutput(config Config, results []ScanResult) error {
 // convention: {sanitized_domain_or_host__share}.zip and placed in the same
 // directory as the output files.
 func zipOutputFiles(config Config) error {
-	// Filter tracked files to only .txt and .json
+	// Filter tracked files to output formats we want in the archive
+	zipExts := map[string]bool{".txt": true, ".json": true, ".jsonl": true, ".sarif": true, ".csv": true}
 	var toZip []string
 	for _, p := range createdFiles.list() {
-		ext := strings.ToLower(filepath.Ext(p))
-		if ext == ".txt" || ext == ".json" {
+		if zipExts[strings.ToLower(filepath.Ext(p))] {
 			toZip = append(toZip, p)
 		}
 	}
@@ -2514,6 +2517,7 @@ func parseArgs() Config {
 	var config Config
 	var additionalExts string
 	var additionalFolders string
+	var keywords string
 	var excludedShares string
 	var outputFormats string
 
@@ -2548,6 +2552,8 @@ func parseArgs() Config {
 	flag.StringVar(&additionalFolders, "xd", "", "Additional directories to exclude (shorthand)")
 	flag.StringVar(&excludedShares, "exclude-shares", "", "Share names to exclude during discovery (comma-separated)")
 	flag.StringVar(&excludedShares, "xs", "", "Share names to exclude during discovery (shorthand)")
+	flag.StringVar(&keywords, "keywords", "", "Filename substrings to always include in scanning (comma-separated)")
+	flag.StringVar(&keywords, "kw", "", "Filename substrings to always include (shorthand)")
 
 	// Output options (note: -o is handled manually after flag.Parse for optional argument support)
 	flag.StringVar(&outputFormats, "output-format", "", "Output formats to save (comma-separated: txt,json,jsonl,sarif,tabularium)")
@@ -2721,6 +2727,15 @@ func parseArgs() Config {
 		}
 	}
 
+	if keywords != "" {
+		for _, kw := range strings.Split(keywords, ",") {
+			kw = strings.TrimSpace(strings.ToLower(kw))
+			if kw != "" {
+				config.Keywords = append(config.Keywords, kw)
+			}
+		}
+	}
+
 	// Parse excluded shares (start with defaults, add user-specified)
 	if !config.NoExclusion {
 		config.ExcludedShares = append(config.ExcludedShares, defaultExcludedShares...)
@@ -2781,6 +2796,9 @@ func parseArgs() Config {
 		flag.Usage()
 		os.Exit(1)
 	}
+
+	// Enable interesting exclusions CSV when output is being saved
+	config.InterestingExcl = config.SaveOutput
 
 	// Activate timestamps after arg validation / help text is done
 	timestampMode = wantTimestamps
@@ -3070,8 +3088,16 @@ func isBinary(header []byte) bool {
 
 // fileJob represents a file path and its size for scanning workers.
 type fileJob struct {
-	path string
-	size int64
+	path        string
+	size        int64
+	interesting bool // matched keyword or quick mode allowlist
+}
+
+// interestingExclusion records a file that matched keyword/quick mode but was skipped.
+type interestingExclusion struct {
+	uncPath string
+	size    int64
+	reason  string // "binary" or "oversize"
 }
 
 // scanFile performs binary detection, file read, and Titus scan on a single file.
@@ -3088,8 +3114,8 @@ func bytesToString(b []byte) string {
 // scanFileSMB reads a file directly from an SMB share and scans it with Titus.
 // Uses a single share.Open() call (saves 1 SMB round-trip vs the old two-open approach).
 // headerBuf is caller-provided via sync.Pool to avoid per-file allocation.
-func scanFileSMB(config Config, share *smb2.Share, path string, size int64,
-	headerBuf []byte, skippedFiles *int64) []fileMatch {
+func scanFileSMB(config Config, share *smb2.Share, path string, size int64, interesting bool,
+	headerBuf []byte, skippedFiles *int64) ([]fileMatch, *interestingExclusion) {
 
 	const largeFileThreshold = 50 * 1024 * 1024
 	const chunkSize = 50 * 1024 * 1024
@@ -3104,13 +3130,16 @@ func scanFileSMB(config Config, share *smb2.Share, path string, size int64,
 				size/(1024*1024), config.MaxScanSize/(1024*1024), displayPath)
 		}
 		atomic.AddInt64(skippedFiles, 1)
-		return nil
+		if interesting && config.InterestingExcl {
+			return nil, &interestingExclusion{uncPath: displayPath, size: size, reason: "oversize"}
+		}
+		return nil, nil
 	}
 
 	// Single open — read header first, then full content if not binary
 	f, err := share.Open(path)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	defer f.Close()
 
@@ -3121,7 +3150,10 @@ func scanFileSMB(config Config, share *smb2.Share, path string, size int64,
 			logf("[*] Skipping binary file: %s\n", displayPath)
 		}
 		atomic.AddInt64(skippedFiles, 1)
-		return nil
+		if interesting && config.InterestingExcl {
+			return nil, &interestingExclusion{uncPath: displayPath, size: size, reason: "binary"}
+		}
+		return nil, nil
 	}
 
 	var matches []fileMatch
@@ -3135,7 +3167,7 @@ func scanFileSMB(config Config, share *smb2.Share, path string, size int64,
 			if config.Verbose {
 				logf("[*] Read error (skipping): %s: %v\n", displayPath, readErr)
 			}
-			return nil
+			return nil, nil
 		}
 		content = content[:n]
 
@@ -3144,7 +3176,7 @@ func scanFileSMB(config Config, share *smb2.Share, path string, size int64,
 			if config.Verbose {
 				logf("[*] Scan error (skipping): %s: %v\n", displayPath, scanErr)
 			}
-			return nil
+			return nil, nil
 		}
 		for _, m := range result.Matches {
 			matches = append(matches, fileMatch{match: m, filePath: displayPath, severity: ruleSeverity(m.RuleID)})
@@ -3187,7 +3219,7 @@ func scanFileSMB(config Config, share *smb2.Share, path string, size int64,
 			offset += int64(chunkSize) - int64(chunkOverlap)
 		}
 	}
-	return matches
+	return matches, nil
 }
 
 // runTitusScanSMB walks the share via native go-smb2 and scans every eligible file with Titus.
@@ -3231,11 +3263,12 @@ func runTitusScanSMB(ctx context.Context, config Config, share *smb2.Share) (Sca
 	}
 
 	var (
-		allMatches   []fileMatch
-		mu           sync.Mutex
-		fileCount    int64
-		dirCount     int64
-		skippedFiles int64
+		allMatches          []fileMatch
+		allInterestingExcl  []interestingExclusion
+		mu                  sync.Mutex
+		fileCount           int64
+		dirCount            int64
+		skippedFiles        int64
 	)
 
 	// Register with live status tracker
@@ -3264,11 +3297,14 @@ func runTitusScanSMB(ctx context.Context, config Config, share *smb2.Share) (Sca
 				if ctx.Err() != nil {
 					return
 				}
-				matches := scanFileSMB(config, share, job.path, job.size, headerBuf, &skippedFiles)
+				matches, excl := scanFileSMB(config, share, job.path, job.size, job.interesting, headerBuf, &skippedFiles)
 				atomic.AddInt64(&fileCount, 1)
-				if len(matches) > 0 {
+				if len(matches) > 0 || excl != nil {
 					mu.Lock()
 					allMatches = append(allMatches, matches...)
+					if excl != nil {
+						allInterestingExcl = append(allInterestingExcl, *excl)
+					}
 					mu.Unlock()
 				}
 			}
@@ -3277,20 +3313,35 @@ func runTitusScanSMB(ctx context.Context, config Config, share *smb2.Share) (Sca
 
 	// Producer: walk share and send eligible files to workers
 	err := smbWalkDir(ctx, share, ".", excludedDirs, config.MaxDepth, config.MaxFilesPerDir, &dirCount, func(path string, size int64) error {
-		if config.QuickMode {
-			if !isQuickModeTarget(path) {
+		// Keyword matches override all exclusion logic
+		keywordMatch := false
+		if len(config.Keywords) > 0 {
+			name := strings.ToLower(filepath.Base(path))
+			for _, kw := range config.Keywords {
+				if strings.Contains(name, kw) {
+					keywordMatch = true
+					break
+				}
+			}
+		}
+		if !keywordMatch {
+			if config.QuickMode {
+				if !isQuickModeTarget(path) {
+					atomic.AddInt64(&skippedFiles, 1)
+					return nil
+				}
+			} else if shouldExcludeExt(path, excludedExts) {
+				if config.Verbose {
+					logf("[*] Skipping excluded: %s\n", toUNCPathSMB(path, config))
+				}
 				atomic.AddInt64(&skippedFiles, 1)
 				return nil
 			}
-		} else if shouldExcludeExt(path, excludedExts) {
-			if config.Verbose {
-				logf("[*] Skipping excluded: %s\n", toUNCPathSMB(path, config))
-			}
-			atomic.AddInt64(&skippedFiles, 1)
-			return nil
 		}
+		// Mark as interesting if keyword matched or (quick mode and passed allowlist)
+		interesting := keywordMatch || config.QuickMode
 		select {
-		case jobs <- fileJob{path: path, size: size}:
+		case jobs <- fileJob{path: path, size: size, interesting: interesting}:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -3336,6 +3387,13 @@ func runTitusScanSMB(ctx context.Context, config Config, share *smb2.Share) (Sca
 		RuleCounts:     ruleCounts,
 	}
 
+	// Write interesting exclusions CSV if enabled and there are entries
+	if config.InterestingExcl && len(allInterestingExcl) > 0 {
+		if err := writeInterestingExclusions(config, allInterestingExcl); err != nil {
+			logf("%s Warning: failed to write interesting exclusions: %v\n", tag, err)
+		}
+	}
+
 	if len(allMatches) == 0 {
 		logf("%s No secrets discovered in this share.\n", tag)
 		return stats, nil
@@ -3361,6 +3419,42 @@ func getOutputFilePath(basePath, format string) string {
 	}
 
 	return baseWithoutExt + extMap[format]
+}
+
+// writeInterestingExclusions writes a CSV of files that matched keywords/quick mode but were
+// skipped due to binary detection or file size limits.
+func writeInterestingExclusions(config Config, exclusions []interestingExclusion) error {
+	// Determine filename base
+	var nameBase string
+	if config.Domain != "" {
+		nameBase = sanitizeFilename(config.Domain)
+	} else {
+		nameBase = sanitizeFilename(config.Host) + "__" + sanitizeFilename(config.Share)
+	}
+	filename := fmt.Sprintf("%s_interesting_exclusions.csv", nameBase)
+
+	// Determine output path
+	outputPath := filename
+	if config.OutputFile != "" {
+		if info, err := os.Stat(config.OutputFile); err == nil && info.IsDir() {
+			outputPath = filepath.Join(config.OutputFile, filename)
+		} else if strings.HasSuffix(config.OutputFile, "/") || strings.HasSuffix(config.OutputFile, string(os.PathSeparator)) {
+			outputPath = filepath.Join(config.OutputFile, filename)
+		}
+	}
+
+	var buf strings.Builder
+	buf.WriteString("unc_path,file_size,exclude_reason\n")
+	for _, e := range exclusions {
+		buf.WriteString(fmt.Sprintf("%s,%d,%s\n", e.uncPath, e.size, e.reason))
+	}
+
+	if err := os.WriteFile(outputPath, []byte(buf.String()), 0644); err != nil {
+		return err
+	}
+	createdFiles.add(outputPath)
+	logf("[+] Interesting exclusions written to %s (%d entries)\n", outputPath, len(exclusions))
+	return nil
 }
 
 // outputTitusResults writes scan results to stdout and, if configured, to output files.
