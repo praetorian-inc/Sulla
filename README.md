@@ -198,7 +198,7 @@ Use `--show-default-exclusions` to see the complete list, or `--no-default-exclu
 | `json` | JSON format for programmatic processing |
 | `jsonl` | JSON Lines format (one finding per line) |
 | `sarif` | SARIF format for integration with security tools |
-| `tabularium` | [Tabularium](https://github.com/praetorian-inc/tabularium) format (discovery mode only) |
+| `tabularium` | [Tabularium](https://github.com/praetorian-inc/tabularium) format (discovery mode only). Secret match values are automatically redacted from proof content |
 
 
 ## Notes

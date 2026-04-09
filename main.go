@@ -1290,6 +1290,33 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dm%02ds", m, s)
 }
 
+// redactProofContent replaces secret match values in text-format proof content
+// with [REDACTED]. Match content can span multiple lines (PEM keys, multi-line
+// credentials), so we walk line-by-line and suppress continuation lines until
+// the next structural boundary (blank line, next finding, next file header).
+func redactProofContent(content string) string {
+	lines := strings.Split(content, "\n")
+	var result []string
+	inMatch := false
+	for _, line := range lines {
+		if strings.HasPrefix(line, "  Match:") {
+			result = append(result, "  Match:   [REDACTED]")
+			inMatch = true
+			continue
+		}
+		if inMatch {
+			if line == "" || strings.HasPrefix(line, "  [") || strings.HasPrefix(line, "File:") || strings.HasPrefix(line, "===") {
+				inMatch = false
+				result = append(result, line)
+			}
+			// else: skip multi-line secret continuation
+			continue
+		}
+		result = append(result, line)
+	}
+	return strings.Join(result, "\n")
+}
+
 // generateTabulariumOutput creates a tabularium-compatible JSON file for Guard platform ingestion
 func generateTabulariumOutput(config Config, results []ScanResult) error {
 	discovery := config.DiscoveryResult
@@ -1368,11 +1395,11 @@ func generateTabulariumOutput(config Config, results []ScanResult) error {
 			proofContent.WriteString(fmt.Sprintf("Share: %s\n", r.Share))
 			proofContent.WriteString("-" + strings.Repeat("-", 30) + "\n")
 
-			// Read the output file if it exists
+			// Read the output file if it exists, redacting secret values
 			if r.OutputPath != "" {
 				content, err := os.ReadFile(r.OutputPath)
 				if err == nil {
-					proofContent.Write(content)
+					proofContent.WriteString(redactProofContent(string(content)))
 				} else {
 					proofContent.WriteString(fmt.Sprintf("[Could not read output file: %v]\n", err))
 				}
