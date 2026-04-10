@@ -27,6 +27,7 @@ import (
 
 	"github.com/go-ldap/ldap/v3"
 	"github.com/hirochachacha/go-smb2"
+	"github.com/praetorian-inc/titus/pkg/enum"
 	titusscanner "github.com/praetorian-inc/titus/pkg/scanner"
 	titussarif "github.com/praetorian-inc/titus/pkg/sarif"
 	titusrule "github.com/praetorian-inc/titus/pkg/rule"
@@ -263,6 +264,7 @@ type Config struct {
 	Keywords           []string         // Additional filename substrings to always include in scanning
 	InterestingExcl    bool             // Write interesting exclusions (keyword/quick match but skipped) to CSV (on when -o is set)
 	ZipOutput          bool             // Zip txt/json output files into a single archive, then delete originals
+	ExtractBinary      bool             // --extract: enable text extraction from binary files (docx, xlsx, pdf, etc.)
 	TargetNum          int              // Current target number (1-based, for progress display)
 	TotalTargets       int              // Total number of targets (for progress display)
 	// Pre-computed exclusions (built once, shared across all targets)
@@ -389,7 +391,7 @@ var defaultExcludedExtensions = []string{
 	// Executables and libraries
 	"exe", "dll", "so", "dylib", "bin", "app", "sys", "drv",
 	// Archives
-	"zip", "tar", "gz", "bz2", "xz", "7z", "rar", "iso", "dmg",
+	"zip", "tar", "gz", "tar.gz", "bz2", "xz", "7z", "rar", "iso", "dmg",
 	// Media files
 	"jpg", "jpeg", "png", "gif", "bmp", "ico", "svg", "webp",
 	"mp3", "mp4", "avi", "mov", "mkv", "flv", "wmv", "wav", "flac",
@@ -2620,6 +2622,8 @@ func parseArgs() Config {
 	flag.BoolVar(&config.QuickMode, "q", false, "Quick mode (shorthand)")
 	flag.BoolVar(&config.ZipOutput, "zip", false, "Zip txt/json output files into a single archive and delete originals")
 	flag.BoolVar(&config.ZipOutput, "z", false, "Zip txt/json output files (shorthand)")
+	flag.BoolVar(&config.ExtractBinary, "extract", false, "Extract and scan text from binary files (docx, xlsx, pptx, pdf, archives, etc.)")
+	flag.BoolVar(&config.ExtractBinary, "x", false, "Extract and scan text from binary files (shorthand)")
 
 	// Concurrency options
 	flag.IntVar(&config.ShareWorkers, "share-workers", 60, "Number of parallel share workers")
@@ -2660,6 +2664,7 @@ func parseArgs() Config {
 		logln("  --zip, -z           Zip all txt/json output files and delete originals. Requires -o flag.")
 		logln("  -v                  Verbose output (show excluded files)")
 		logln("\nScanning:")
+		logln("  --extract, -x            Extract and scan text from binary files (docx, xlsx, pdf, etc.)")
 		logln("  --quick, -q              Quick mode: high-value files only, depth 5, 15 min/share")
 		logln("  --max-scan-size, -ms     Max file size to scan in MB (default: 5, 0 = no limit)")
 		logln("  --max-depth, -md         Max directory recursion depth (default: 0 = unlimited)")
@@ -3023,6 +3028,13 @@ func buildExcludedExtensions(config Config) map[string]bool {
 	for _, ext := range config.AdditionalExts {
 		exts[strings.ToLower(ext)] = true
 	}
+	// When --extract is on, remove extractable types from the exclusion set
+	// so they reach the scanner and can be routed to the extraction path.
+	if config.ExtractBinary {
+		for ext := range extractableExtsWithoutDot {
+			delete(exts, ext)
+		}
+	}
 	return exts
 }
 
@@ -3061,6 +3073,12 @@ func buildExcludedDirectories(config Config) dirExclusions {
 
 // shouldExcludeExt reports whether the file at path should be skipped based on extension.
 func shouldExcludeExt(path string, excluded map[string]bool) bool {
+	// Handle .tar.gz specially — filepath.Ext returns ".gz" but we want to
+	// treat ".tar.gz" as a single extension to match getExtension behavior.
+	lower := strings.ToLower(path)
+	if strings.HasSuffix(lower, ".tar.gz") {
+		return excluded["tar.gz"]
+	}
 	ext := strings.TrimPrefix(filepath.Ext(path), ".")
 	return excluded[strings.ToLower(ext)]
 }
@@ -3076,6 +3094,40 @@ func shouldExcludeDir(name string, excl dirExclusions) bool {
 		}
 	}
 	return false
+}
+
+// getExtension returns the lowercase file extension, handling .tar.gz specially.
+// sync with titus/pkg/enum/extractor.go:getExtension
+func getExtension(path string) string {
+	lower := strings.ToLower(path)
+	if strings.HasSuffix(lower, ".tar.gz") {
+		return ".tar.gz"
+	}
+	return strings.ToLower(filepath.Ext(path))
+}
+
+// isExtractable reports whether the file extension is supported by Titus text extraction.
+// sync with titus/pkg/enum/extractor.go:isExtractable
+func isExtractable(ext string) bool {
+	switch ext {
+	case ".zip", ".jar", ".war", ".ear", ".apk", ".ipa", ".xpi", ".crx",
+		".xlsx", ".docx", ".pptx", ".pdf",
+		".tar", ".tar.gz", ".tgz", ".7z",
+		".ipynb", ".odt", ".ods", ".odp", ".eml", ".rtf",
+		".sqlite", ".db":
+		return true
+	}
+	return false
+}
+
+// extractableExtsWithoutDot is the set of extensions (without leading dot) that isExtractable covers.
+// Used by buildExcludedExtensions to un-exclude these when --extract is on.
+var extractableExtsWithoutDot = map[string]bool{
+	"zip": true, "jar": true, "war": true, "ear": true, "apk": true, "ipa": true, "xpi": true, "crx": true,
+	"xlsx": true, "docx": true, "pptx": true, "pdf": true,
+	"tar": true, "tar.gz": true, "tgz": true, "7z": true,
+	"ipynb": true, "odt": true, "ods": true, "odp": true, "eml": true, "rtf": true,
+	"sqlite": true, "db": true,
 }
 
 // isBinary returns true if the header bytes look like a binary (non-text) file.
@@ -3156,8 +3208,28 @@ func scanFileSMB(config Config, share *smb2.Share, path string, size int64, inte
 
 	displayPath := toUNCPathSMB(path, config)
 
-	// Size gate
-	if config.MaxScanSize > 0 && size > config.MaxScanSize {
+	// Check if this file is extractable (before size gate, since extractable files
+	// use Titus extraction limits instead of MaxScanSize).
+	ext := getExtension(path)
+	extractable := isExtractable(ext)
+	shouldExtract := extractable && (config.ExtractBinary || interesting)
+
+	// Size gate — extractable files use the extraction limit (10MB) instead of MaxScanSize,
+	// since Titus extraction already bounds memory internally.
+	if shouldExtract {
+		extractionMaxSize := enum.DefaultExtractionLimits().MaxSize
+		if size > extractionMaxSize {
+			if config.Verbose {
+				logf("[*] Skipping oversized extractable file (%d MB > %d MB extraction limit): %s\n",
+					size/(1024*1024), extractionMaxSize/(1024*1024), displayPath)
+			}
+			atomic.AddInt64(skippedFiles, 1)
+			if interesting && config.InterestingExcl {
+				return nil, &interestingExclusion{uncPath: displayPath, size: size, reason: "oversize"}
+			}
+			return nil, nil
+		}
+	} else if config.MaxScanSize > 0 && size > config.MaxScanSize {
 		if config.Verbose {
 			logf("[*] Skipping oversized file (%d MB > %d MB limit): %s\n",
 				size/(1024*1024), config.MaxScanSize/(1024*1024), displayPath)
@@ -3175,6 +3247,44 @@ func scanFileSMB(config Config, share *smb2.Share, path string, size int64, inte
 		return nil, nil
 	}
 	defer f.Close()
+
+	// Extraction path: read full content and extract text from binary formats.
+	// Bypasses header/binary detection since extractable files are always binary.
+	if shouldExtract {
+		content := make([]byte, size)
+		n, readErr := io.ReadFull(f, content)
+		if readErr != nil && readErr != io.ErrUnexpectedEOF {
+			if config.Verbose {
+				logf("[*] Read error (skipping): %s: %v\n", displayPath, readErr)
+			}
+			return nil, nil
+		}
+		content = content[:n]
+
+		extracted, extractErr := enum.ExtractText(path, content, enum.DefaultExtractionLimits())
+		if extractErr != nil {
+			if config.Verbose {
+				logf("[*] Extraction error (skipping): %s: %v\n", displayPath, extractErr)
+			}
+			return nil, nil
+		}
+
+		var matches []fileMatch
+		for _, ec := range extracted {
+			compoundPath := displayPath + ":" + ec.Name
+			result, scanErr := titusCore.Scan(bytesToString(ec.Content), compoundPath)
+			if scanErr != nil {
+				if config.Verbose {
+					logf("[*] Scan error (skipping): %s: %v\n", compoundPath, scanErr)
+				}
+				continue
+			}
+			for _, m := range result.Matches {
+				matches = append(matches, fileMatch{match: m, filePath: compoundPath, severity: ruleSeverity(m.RuleID)})
+			}
+		}
+		return matches, nil
+	}
 
 	// Read header for binary detection (reuse caller-provided buffer)
 	n, _ := f.Read(headerBuf)
@@ -3359,7 +3469,7 @@ func runTitusScanSMB(ctx context.Context, config Config, share *smb2.Share) (Sca
 		}
 		if !keywordMatch {
 			if config.QuickMode {
-				if !isQuickModeTarget(path) {
+				if !isQuickModeTarget(path) && !(config.ExtractBinary && isExtractable(getExtension(path))) {
 					atomic.AddInt64(&skippedFiles, 1)
 					return nil
 				}
