@@ -759,7 +759,13 @@ func main() {
 		}
 
 		// Create scanner with filtered rules
-		titusCore, err = titusscanner.NewCoreWithRules(filteredRules, nil)
+		var titusWarnFunc func(string, ...any)
+		if config.Verbose {
+			titusWarnFunc = func(format string, args ...any) {
+				fmt.Fprintf(os.Stderr, format, args...)
+			}
+		}
+		titusCore, err = titusscanner.NewCoreWithRules(filteredRules, nil, titusWarnFunc)
 		if err != nil {
 			logf("Error: Failed to initialize Titus scanner: %v\n", err)
 			os.Exit(1)
