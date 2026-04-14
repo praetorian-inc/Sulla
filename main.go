@@ -56,6 +56,11 @@ func logf(format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
 	logMu.Lock()
 	defer logMu.Unlock()
+	// Clear ticker line if one is showing
+	if tickerLine != "" {
+		fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", len(tickerLine)))
+		tickerLine = ""
+	}
 	for len(msg) > 0 {
 		if logAtLineStart && timestampMode {
 			fmt.Fprintf(os.Stderr, "[%s] ", time.Now().Format("2006-01-02 15:04:05"))
@@ -87,7 +92,7 @@ type shareStatus struct {
 }
 
 // shareTracker maintains the set of currently-scanning shares and prints
-// their status when requested (Enter keypress).
+// their status when requested (Enter keypress) or via a periodic ticker.
 type shareTracker struct {
 	mu        sync.Mutex
 	shares    map[string]*shareStatus // keyed by tag
@@ -95,13 +100,29 @@ type shareTracker struct {
 	stopCh    chan struct{}
 	total     int64 // total number of targets (set once at start)
 	completed int64 // atomically incremented as shares finish
+	findings  int64 // atomically incremented as findings are discovered
+	startTime time.Time
+	tickerOn  bool // whether the periodic ticker is active
+}
+
+// tickerLine holds the last ticker string written to stderr so logf can clear it.
+var tickerLine string
+
+// isTerminal reports whether f is a terminal (character device).
+func isTerminal(f *os.File) bool {
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
 }
 
 func newShareTracker(total int) *shareTracker {
 	return &shareTracker{
-		shares: make(map[string]*shareStatus),
-		stopCh: make(chan struct{}),
-		total:  int64(total),
+		shares:    make(map[string]*shareStatus),
+		stopCh:    make(chan struct{}),
+		total:     int64(total),
+		startTime: time.Now(),
 	}
 }
 
@@ -206,6 +227,51 @@ func (st *shareTracker) startStdinListener() {
 
 func (st *shareTracker) stop() {
 	close(st.stopCh)
+	// Clear any remaining ticker line
+	logMu.Lock()
+	if tickerLine != "" {
+		fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", len(tickerLine)))
+		tickerLine = ""
+	}
+	logMu.Unlock()
+}
+
+// writeTicker prints a single-line progress update using \r overwrite.
+func (st *shareTracker) writeTicker() {
+	total := atomic.LoadInt64(&st.total)
+	done := atomic.LoadInt64(&st.completed)
+	active := int64(len(st.shares))
+	finds := atomic.LoadInt64(&st.findings)
+	elapsed := time.Since(st.startTime).Round(time.Second)
+
+	line := fmt.Sprintf("[*] %d/%d complete, %d scanning, %d findings (%s) — hit Enter for full status",
+		done, total, active, finds, elapsed)
+
+	logMu.Lock()
+	// Clear previous ticker if longer
+	if len(tickerLine) > len(line) {
+		fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", len(tickerLine)))
+	}
+	fmt.Fprintf(os.Stderr, "\r%s", line)
+	tickerLine = line
+	logMu.Unlock()
+}
+
+// startTicker runs a periodic status ticker (every 5s) when in default mode.
+func (st *shareTracker) startTicker() {
+	st.tickerOn = true
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				st.writeTicker()
+			case <-st.stopCh:
+				return
+			}
+		}
+	}()
 }
 
 // outputFileTracker collects paths of files created by smbellum for zip packaging.
@@ -245,6 +311,7 @@ type Config struct {
 	OutputFile         string
 	OutputFormats      []string // Output formats: txt, json, jsonl, sarif, tabularium
 	Verbose            bool
+	Debug              bool             // --debug: show per-file diagnostics (skipped files, errors, chunking)
 	TargetsFile        string
 	DomainController   string
 	UseLDAPS           bool             // Use LDAPS (port 636) instead of LDAP (port 389)
@@ -762,7 +829,7 @@ func main() {
 
 		// Create scanner with filtered rules
 		var titusWarnFunc func(string, ...any)
-		if config.Verbose {
+		if config.Debug {
 			titusWarnFunc = func(format string, args ...any) {
 				fmt.Fprintf(os.Stderr, format, args...)
 			}
@@ -953,12 +1020,18 @@ func main() {
 	tracker := newShareTracker(len(targets))
 	config.Tracker = tracker
 	tracker.startStdinListener()
+	// Start live ticker in default mode when stderr is a terminal
+	if !config.Verbose && !config.Debug && isTerminal(os.Stderr) {
+		tracker.startTicker()
+	}
 	defer tracker.stop()
 
 	results := make([]ScanResult, len(targets))
 	sem := make(chan struct{}, config.ShareWorkers)
 	var wg sync.WaitGroup
 	scanStartAll := time.Now()
+
+	logf("[*] Scanning %d shares\n", len(targets))
 
 	for i, target := range targets {
 		// Create a copy of config for this target
@@ -997,6 +1070,9 @@ func main() {
 			}
 
 			stats, outputPath, err := scanTarget(ctx, tc)
+			if stats.MatchCount > 0 {
+				atomic.AddInt64(&tracker.findings, int64(stats.MatchCount))
+			}
 			results[idx] = ScanResult{
 				Host:           t.Host,
 				Share:          t.Share,
@@ -1011,7 +1087,7 @@ func main() {
 				SeverityCounts: stats.SeverityCounts,
 				RuleCounts:     stats.RuleCounts,
 			}
-			if err != nil {
+			if err != nil && config.Verbose {
 				logf("[-] Failed: //%s/%s - %v\n", t.Host, t.Share, err)
 			}
 		}(i, targetConfig, target, i+1)
@@ -1055,7 +1131,9 @@ func scanTarget(ctx context.Context, config Config) (ScanStats, string, error) {
 	}
 
 	tag := targetTag(config)
-	logf("%s Connecting...\n", tag)
+	if config.Verbose {
+		logf("%s Connecting...\n", tag)
+	}
 
 	// Register as connecting so status shows this share
 	if config.Tracker != nil {
@@ -1076,12 +1154,15 @@ func scanTarget(ctx context.Context, config Config) (ScanStats, string, error) {
 		conn.SetDeadline(time.Now().Add(10 * time.Second))
 		share.Umount()
 		session.Logoff()
+		conn.Close()
 	}()
 
-	if config.TotalTargets > 0 {
-		logf("%s Connected via SMB, target %d/%d\n", tag, config.TargetNum, config.TotalTargets)
-	} else {
-		logf("%s Connected via SMB\n", tag)
+	if config.Verbose {
+		if config.TotalTargets > 0 {
+			logf("%s Connected via SMB, target %d/%d\n", tag, config.TargetNum, config.TotalTargets)
+		} else {
+			logf("%s Connected via SMB\n", tag)
+		}
 	}
 
 	// Apply per-share time limit if configured
@@ -1090,10 +1171,14 @@ func scanTarget(ctx context.Context, config Config) (ScanStats, string, error) {
 		var cancel context.CancelFunc
 		scanCtx, cancel = context.WithTimeout(ctx, time.Duration(config.MaxShareTime)*time.Minute)
 		defer cancel()
-		logf("%s Time limit: %d minutes per share\n", tag, config.MaxShareTime)
+		if config.Verbose {
+			logf("%s Time limit: %d minutes per share\n", tag, config.MaxShareTime)
+		}
 	}
 
-	logf("%s Running Titus scan...\n", tag)
+	if config.Verbose {
+		logf("%s Running Titus scan...\n", tag)
+	}
 	scanStart := time.Now()
 	stats, err := runTitusScanSMB(scanCtx, config, share)
 	scanDuration := time.Since(scanStart)
@@ -1101,7 +1186,9 @@ func scanTarget(ctx context.Context, config Config) (ScanStats, string, error) {
 		return stats, "", fmt.Errorf("scan failed: %w", err)
 	}
 
-	logf("%s Scan complete (%s)\n", tag, scanDuration.Round(time.Millisecond))
+	if config.Verbose {
+		logf("%s Scan complete (%s)\n", tag, scanDuration.Round(time.Millisecond))
+	}
 	return stats, config.OutputFile, nil
 }
 
@@ -1748,7 +1835,9 @@ func discoverTargets(config Config, fetchSIDs bool) ([]Target, *DiscoveryResult,
 			for _, share := range result.shares {
 				totalShares++
 				targets = append(targets, Target{Host: result.host, Share: share})
-				logf("[+] Found \\\\%s\\%s\n", result.host, share)
+				if config.Verbose {
+					logf("[+] Found \\\\%s\\%s\n", result.host, share)
+				}
 			}
 		}
 	}
@@ -1766,13 +1855,15 @@ func discoverTargets(config Config, fetchSIDs bool) ([]Target, *DiscoveryResult,
 			// DFS discovery failure is non-fatal — continue without dedup
 			logf("[!] DFS namespace discovery failed (continuing without DFS dedup): %v\n", dfsErr)
 		} else if len(dfsLinks) > 0 {
-			logf("[+] Found DFS links covering %d physical share(s)\n", len(dfsLinks))
+			if config.Verbose {
+				logf("[+] Found DFS links covering %d physical share(s)\n", len(dfsLinks))
+			}
 			var removed int
 			targets, removed = deduplicateTargetsWithDFS(targets, dfsLinks, config.Domain)
-			if removed > 0 {
+			if removed > 0 && config.Verbose {
 				logf("[+] DFS dedup: removed %d duplicate target(s), %d target(s) remaining\n", removed, len(targets))
 			}
-		} else {
+		} else if config.Verbose {
 			logln("[*] No DFS namespaces found")
 		}
 
@@ -1783,7 +1874,7 @@ func discoverTargets(config Config, fetchSIDs bool) ([]Target, *DiscoveryResult,
 		if dfsErr == nil {
 			var replicatedRemoved int
 			targets, replicatedRemoved = deduplicateReplicatedShares(targets, config.Domain)
-			if replicatedRemoved > 0 {
+			if replicatedRemoved > 0 && config.Verbose {
 				logf("[+] DFSR dedup: removed %d duplicate replicated share(s), %d target(s) remaining\n", replicatedRemoved, len(targets))
 			}
 		}
@@ -1867,31 +1958,41 @@ func connectToLDAP(dc string, config Config) (*ldap.Conn, string, error) {
 
 	// Attempt 1: LDAPS + channel binding (NTLM)
 	if config.ChannelBinding || config.UseLDAPS || autoNegotiate {
+		var lastErr error
 		l, err := ldap.DialURL(fmt.Sprintf("ldaps://%s:636", dcAddr), ldap.DialWithTLSConfig(tlsConfig))
 		if err == nil {
 			if bindErr := l.NTLMBind(config.Domain, config.Username, config.Password); bindErr == nil {
 				return l, "LDAPS with channel binding (NTLM)", nil
+			} else {
+				lastErr = bindErr
 			}
 			l.Close()
+		} else {
+			lastErr = err
 		}
 		// If channel-binding was explicitly requested, don't fall back
 		if config.ChannelBinding && !config.UseLDAPS {
-			return nil, "", fmt.Errorf("LDAPS with channel binding failed for %s: %w", dc, err)
+			return nil, "", fmt.Errorf("LDAPS with channel binding failed for %s: %w", dc, lastErr)
 		}
 	}
 
 	// Attempt 2: LDAPS + simple bind
 	if config.UseLDAPS || autoNegotiate {
+		var lastErr error
 		l, err := ldap.DialURL(fmt.Sprintf("ldaps://%s:636", dcAddr), ldap.DialWithTLSConfig(tlsConfig))
 		if err == nil {
 			if bindErr := l.Bind(bindUser, config.Password); bindErr == nil {
 				return l, "LDAPS", nil
+			} else {
+				lastErr = bindErr
 			}
 			l.Close()
+		} else {
+			lastErr = err
 		}
 		// If --ldaps was explicitly requested, don't fall back to plain LDAP
 		if config.UseLDAPS {
-			return nil, "", fmt.Errorf("LDAPS connection failed for %s: %w", dc, err)
+			return nil, "", fmt.Errorf("LDAPS connection failed for %s: %w", dc, lastErr)
 		}
 	}
 
@@ -1901,9 +2002,10 @@ func connectToLDAP(dc string, config Config) (*ldap.Conn, string, error) {
 		if err == nil {
 			if bindErr := l.Bind(bindUser, config.Password); bindErr == nil {
 				return l, "LDAP", nil
+			} else {
+				l.Close()
+				return nil, "", fmt.Errorf("LDAP bind failed for %s: %w", dc, bindErr)
 			}
-			l.Close()
-			return nil, "", fmt.Errorf("LDAP bind failed for %s: %w", dc, err)
 		}
 		return nil, "", fmt.Errorf("failed to connect to DC %s: %w", dc, err)
 	}
@@ -1935,7 +2037,9 @@ func discoverComputers(config Config, domainControllers []string, fetchSIDs bool
 	}
 	defer l.Close()
 
-	logf("[+] %s connection established to %s\n", connMethod, connectedDC)
+	if config.Verbose {
+		logf("[+] %s connection established to %s\n", connMethod, connectedDC)
+	}
 
 	baseDN := domainToBaseDN(config.Domain)
 
@@ -2143,7 +2247,7 @@ func discoverDFSNamespaces(config Config, domainControllers []string) (map[strin
 	var v2Results map[string][]DFSLink
 	if v2Err == nil && len(sr.Entries) > 0 {
 		v2Results = parseDFSv2Entries(sr.Entries, config.Domain)
-		if config.Verbose {
+		if config.Debug {
 			logf("[*] DFS: found %d v2 link entries\n", len(sr.Entries))
 		}
 	}
@@ -2161,7 +2265,7 @@ func discoverDFSNamespaces(config Config, domainControllers []string) (map[strin
 	var legacyResults map[string][]DFSLink
 	if legacyErr == nil && len(legacySR.Entries) > 0 {
 		legacyResults = parseLegacyDFSEntries(legacySR.Entries, config.Domain)
-		if config.Verbose {
+		if config.Debug {
 			logf("[*] DFS: found %d legacy (fTDfs) entries\n", len(legacySR.Entries))
 		}
 	}
@@ -2593,8 +2697,10 @@ func parseArgs() Config {
 	// Output options (note: -o is handled manually after flag.Parse for optional argument support)
 	flag.StringVar(&outputFormats, "output-format", "", "Output formats to save (comma-separated: txt,json,jsonl,sarif,tabularium)")
 	flag.StringVar(&outputFormats, "of", "", "Output formats to save (shorthand)")
-	flag.BoolVar(&config.Verbose, "verbose", false, "Verbose output (show excluded files)")
-	flag.BoolVar(&config.Verbose, "v", false, "Verbose output (shorthand)")
+	flag.BoolVar(&config.Verbose, "verbose", false, "Show per-share progress (connections, scan lifecycle)")
+	flag.BoolVar(&config.Verbose, "v", false, "Show per-share progress (shorthand)")
+	flag.BoolVar(&config.Debug, "debug", false, "Show per-file diagnostics (skipped files, errors, chunking)")
+	flag.BoolVar(&config.Debug, "de", false, "Show per-file diagnostics (shorthand)")
 	var wantTimestamps bool
 	flag.BoolVar(&wantTimestamps, "timestamp", false, "Prepend timestamp to every log line")
 	flag.BoolVar(&wantTimestamps, "ts", false, "Prepend timestamp to every log line (shorthand)")
@@ -2662,7 +2768,8 @@ func parseArgs() Config {
 		logln("  --output-format, -of  Output formats to save (comma-separated: txt,json,jsonl,sarif,tabularium)")
 		logln("                        Default: txt. Requires -o flag.")
 		logln("  --zip, -z           Zip all txt/json output files and delete originals. Requires -o flag.")
-		logln("  -v                  Verbose output (show excluded files)")
+		logln("  -v, --verbose       Show per-share progress (connections, scan lifecycle)")
+		logln("  -de, --debug        Show per-file diagnostics (skipped files, errors, chunking)")
 		logln("\nScanning:")
 		logln("  --extract, -x            Extract and scan text from binary files (docx, xlsx, pdf, etc.)")
 		logln("  --quick, -q              Quick mode: high-value files only, depth 5, 15 min/share")
@@ -2934,6 +3041,7 @@ func smbConnect(ctx context.Context, config Config) (net.Conn, *smb2.Session, *s
 	share, err := session.Mount(config.Share)
 	if err != nil {
 		session.Logoff()
+		conn.Close()
 		return nil, nil, nil, fmt.Errorf("mount %s\\%s failed: %w", config.Host, config.Share, err)
 	}
 
@@ -3219,7 +3327,7 @@ func scanFileSMB(config Config, share *smb2.Share, path string, size int64, inte
 	if shouldExtract {
 		extractionMaxSize := enum.DefaultExtractionLimits().MaxSize
 		if size > extractionMaxSize {
-			if config.Verbose {
+			if config.Debug {
 				logf("[*] Skipping oversized extractable file (%d MB > %d MB extraction limit): %s\n",
 					size/(1024*1024), extractionMaxSize/(1024*1024), displayPath)
 			}
@@ -3230,7 +3338,7 @@ func scanFileSMB(config Config, share *smb2.Share, path string, size int64, inte
 			return nil, nil
 		}
 	} else if config.MaxScanSize > 0 && size > config.MaxScanSize {
-		if config.Verbose {
+		if config.Debug {
 			logf("[*] Skipping oversized file (%d MB > %d MB limit): %s\n",
 				size/(1024*1024), config.MaxScanSize/(1024*1024), displayPath)
 		}
@@ -3254,7 +3362,7 @@ func scanFileSMB(config Config, share *smb2.Share, path string, size int64, inte
 		content := make([]byte, size)
 		n, readErr := io.ReadFull(f, content)
 		if readErr != nil && readErr != io.ErrUnexpectedEOF {
-			if config.Verbose {
+			if config.Debug {
 				logf("[*] Read error (skipping): %s: %v\n", displayPath, readErr)
 			}
 			return nil, nil
@@ -3263,7 +3371,7 @@ func scanFileSMB(config Config, share *smb2.Share, path string, size int64, inte
 
 		extracted, extractErr := enum.ExtractText(path, content, enum.DefaultExtractionLimits())
 		if extractErr != nil {
-			if config.Verbose {
+			if config.Debug {
 				logf("[*] Extraction error (skipping): %s: %v\n", displayPath, extractErr)
 			}
 			return nil, nil
@@ -3274,7 +3382,7 @@ func scanFileSMB(config Config, share *smb2.Share, path string, size int64, inte
 			compoundPath := displayPath + ":" + ec.Name
 			result, scanErr := titusCore.Scan(bytesToString(ec.Content), compoundPath)
 			if scanErr != nil {
-				if config.Verbose {
+				if config.Debug {
 					logf("[*] Scan error (skipping): %s: %v\n", compoundPath, scanErr)
 				}
 				continue
@@ -3289,7 +3397,7 @@ func scanFileSMB(config Config, share *smb2.Share, path string, size int64, inte
 	// Read header for binary detection (reuse caller-provided buffer)
 	n, _ := f.Read(headerBuf)
 	if n > 0 && isBinary(headerBuf[:n]) {
-		if config.Verbose {
+		if config.Debug {
 			logf("[*] Skipping binary file: %s\n", displayPath)
 		}
 		atomic.AddInt64(skippedFiles, 1)
@@ -3307,7 +3415,7 @@ func scanFileSMB(config Config, share *smb2.Share, path string, size int64, inte
 		f.Seek(0, io.SeekStart)
 		n, readErr := io.ReadFull(f, content)
 		if readErr != nil && readErr != io.ErrUnexpectedEOF {
-			if config.Verbose {
+			if config.Debug {
 				logf("[*] Read error (skipping): %s: %v\n", displayPath, readErr)
 			}
 			return nil, nil
@@ -3316,7 +3424,7 @@ func scanFileSMB(config Config, share *smb2.Share, path string, size int64, inte
 
 		result, scanErr := titusCore.Scan(bytesToString(content), displayPath)
 		if scanErr != nil {
-			if config.Verbose {
+			if config.Debug {
 				logf("[*] Scan error (skipping): %s: %v\n", displayPath, scanErr)
 			}
 			return nil, nil
@@ -3326,7 +3434,7 @@ func scanFileSMB(config Config, share *smb2.Share, path string, size int64, inte
 		}
 	} else {
 		// Large file: chunked reading via smb2 file handle
-		if config.Verbose {
+		if config.Debug {
 			logf("[*] Large file (%d MB), scanning in chunks: %s\n", size/(1024*1024), displayPath)
 		}
 		seen := make(map[string]bool)
@@ -3377,42 +3485,79 @@ func runTitusScanSMB(ctx context.Context, config Config, share *smb2.Share) (Sca
 	excludedDirs := config.ExcludedDirs
 
 	// Show exclusion/quick mode info
-	if config.QuickMode {
-		depthInfo := "unlimited"
-		if config.MaxDepth > 0 {
-			depthInfo = fmt.Sprintf("%d", config.MaxDepth)
-		}
-		timeInfo := "indefinite"
-		if config.MaxShareTime > 0 {
-			timeInfo = fmt.Sprintf("%d min", config.MaxShareTime)
-		}
-		filesInfo := "unlimited"
-		if config.MaxFilesPerDir > 0 {
-			filesInfo = fmt.Sprintf("%d", config.MaxFilesPerDir)
-		}
-		logf("%s Quick mode: %d extensions, %d filenames, depth %s, %s files/dir, %s/share\n",
-			tag, len(quickModeExtensions), len(quickModeExactFilenames)+len(quickModeContainsFilenames), depthInfo, filesInfo, timeInfo)
-	} else if !config.NoExclusion {
-		if config.Verbose {
+	if config.Verbose {
+		if config.QuickMode {
+			depthInfo := "unlimited"
+			if config.MaxDepth > 0 {
+				depthInfo = fmt.Sprintf("%d", config.MaxDepth)
+			}
+			timeInfo := "indefinite"
+			if config.MaxShareTime > 0 {
+				timeInfo = fmt.Sprintf("%d min", config.MaxShareTime)
+			}
+			filesInfo := "unlimited"
+			if config.MaxFilesPerDir > 0 {
+				filesInfo = fmt.Sprintf("%d", config.MaxFilesPerDir)
+			}
+			logf("%s Quick mode: %d extensions, %d filenames, depth %s, %s files/dir, %s/share\n",
+				tag, len(quickModeExtensions), len(quickModeExactFilenames)+len(quickModeContainsFilenames), depthInfo, filesInfo, timeInfo)
+		} else if !config.NoExclusion {
 			logf("%s Using default exclusions (%d extensions, %d folders)\n",
 				tag, len(defaultExcludedExtensions), len(defaultExcludedFolders))
 		}
-	} else {
-		logf("%s WARNING: Scanning all files (no exclusions enabled)\n", tag)
+		if len(config.AdditionalExts) > 0 || len(config.AdditionalFolders) > 0 {
+			logf("%s Additional exclusions: %d extensions, %d folders\n",
+				tag, len(config.AdditionalExts), len(config.AdditionalFolders))
+		}
 	}
-	if len(config.AdditionalExts) > 0 || len(config.AdditionalFolders) > 0 {
-		logf("%s Additional exclusions: %d extensions, %d folders\n",
-			tag, len(config.AdditionalExts), len(config.AdditionalFolders))
+	if !config.Verbose && config.NoExclusion {
+		logf("%s WARNING: Scanning all files (no exclusions enabled)\n", tag)
 	}
 
 	var (
-		allMatches          []fileMatch
-		allInterestingExcl  []interestingExclusion
-		mu                  sync.Mutex
-		fileCount           int64
-		dirCount            int64
-		skippedFiles        int64
+		allMatches   []fileMatch
+		mu           sync.Mutex
+		fileCount    int64
+		dirCount     int64
+		skippedFiles int64
 	)
+
+	// Streaming writer for interesting exclusions — writes each entry to disk
+	// as it arrives via a buffered channel so nothing is lost on interrupt.
+	var (
+		exclCh    chan interestingExclusion
+		exclDone  chan struct{}
+		exclCount int64
+	)
+	if config.InterestingExcl {
+		exclPath := interestingExclPath(config)
+		exclCh = make(chan interestingExclusion, 4096)
+		exclDone = make(chan struct{})
+		go func() {
+			defer close(exclDone)
+			f, err := os.Create(exclPath)
+			if err != nil {
+				logf("%s Warning: failed to create interesting exclusions file: %v\n", tag, err)
+				// Drain channel so workers never block
+				for range exclCh {
+				}
+				return
+			}
+			defer f.Close()
+			w := bufio.NewWriter(f)
+			defer w.Flush()
+			w.WriteString("unc_path,file_size,exclude_reason\n")
+			for e := range exclCh {
+				fmt.Fprintf(w, "%s,%d,%s\n", e.uncPath, e.size, e.reason)
+				atomic.AddInt64(&exclCount, 1)
+				// Flush periodically so data hits disk even on crash
+				if atomic.LoadInt64(&exclCount)%64 == 0 {
+					w.Flush()
+				}
+			}
+			createdFiles.add(exclPath)
+		}()
+	}
 
 	// Register with live status tracker
 	if config.Tracker != nil {
@@ -3442,12 +3587,12 @@ func runTitusScanSMB(ctx context.Context, config Config, share *smb2.Share) (Sca
 				}
 				matches, excl := scanFileSMB(config, share, job.path, job.size, job.interesting, headerBuf, &skippedFiles)
 				atomic.AddInt64(&fileCount, 1)
-				if len(matches) > 0 || excl != nil {
+				if excl != nil && exclCh != nil {
+					exclCh <- *excl
+				}
+				if len(matches) > 0 {
 					mu.Lock()
 					allMatches = append(allMatches, matches...)
-					if excl != nil {
-						allInterestingExcl = append(allInterestingExcl, *excl)
-					}
 					mu.Unlock()
 				}
 			}
@@ -3474,7 +3619,7 @@ func runTitusScanSMB(ctx context.Context, config Config, share *smb2.Share) (Sca
 					return nil
 				}
 			} else if shouldExcludeExt(path, excludedExts) {
-				if config.Verbose {
+				if config.Debug {
 					logf("[*] Skipping excluded: %s\n", toUNCPathSMB(path, config))
 				}
 				atomic.AddInt64(&skippedFiles, 1)
@@ -3507,7 +3652,7 @@ func runTitusScanSMB(ctx context.Context, config Config, share *smb2.Share) (Sca
 	sf := atomic.LoadInt64(&skippedFiles)
 	if timedOut {
 		logf("%s Time limit reached — scanned %d files in %d directories (partial)\n", tag, fc, dc)
-	} else {
+	} else if config.Verbose {
 		logf("%s Scanned %d files in %d directories\n", tag, fc, dc)
 	}
 
@@ -3530,15 +3675,19 @@ func runTitusScanSMB(ctx context.Context, config Config, share *smb2.Share) (Sca
 		RuleCounts:     ruleCounts,
 	}
 
-	// Write interesting exclusions CSV if enabled and there are entries
-	if config.InterestingExcl && len(allInterestingExcl) > 0 {
-		if err := writeInterestingExclusions(config, allInterestingExcl); err != nil {
-			logf("%s Warning: failed to write interesting exclusions: %v\n", tag, err)
+	// Close the streaming interesting exclusions writer and wait for it to flush
+	if exclCh != nil {
+		close(exclCh)
+		<-exclDone
+		if n := atomic.LoadInt64(&exclCount); n > 0 && config.Verbose {
+			logf("[+] Interesting exclusions written to %s (%d entries)\n", interestingExclPath(config), n)
 		}
 	}
 
 	if len(allMatches) == 0 {
-		logf("%s No secrets discovered in this share.\n", tag)
+		if config.Verbose {
+			logf("%s No secrets discovered in this share.\n", tag)
+		}
 		return stats, nil
 	}
 
@@ -3564,10 +3713,8 @@ func getOutputFilePath(basePath, format string) string {
 	return baseWithoutExt + extMap[format]
 }
 
-// writeInterestingExclusions writes a CSV of files that matched keywords/quick mode but were
-// skipped due to binary detection or file size limits.
-func writeInterestingExclusions(config Config, exclusions []interestingExclusion) error {
-	// Determine filename base
+// interestingExclPath returns the output file path for the interesting exclusions CSV.
+func interestingExclPath(config Config) string {
 	var nameBase string
 	if config.Domain != "" {
 		nameBase = sanitizeFilename(config.Domain)
@@ -3576,7 +3723,6 @@ func writeInterestingExclusions(config Config, exclusions []interestingExclusion
 	}
 	filename := fmt.Sprintf("%s_interesting_exclusions.csv", nameBase)
 
-	// Determine output path
 	outputPath := filename
 	if config.OutputFile != "" {
 		if info, err := os.Stat(config.OutputFile); err == nil && info.IsDir() {
@@ -3585,25 +3731,38 @@ func writeInterestingExclusions(config Config, exclusions []interestingExclusion
 			outputPath = filepath.Join(config.OutputFile, filename)
 		}
 	}
-
-	var buf strings.Builder
-	buf.WriteString("unc_path,file_size,exclude_reason\n")
-	for _, e := range exclusions {
-		buf.WriteString(fmt.Sprintf("%s,%d,%s\n", e.uncPath, e.size, e.reason))
-	}
-
-	if err := os.WriteFile(outputPath, []byte(buf.String()), 0644); err != nil {
-		return err
-	}
-	createdFiles.add(outputPath)
-	logf("[+] Interesting exclusions written to %s (%d entries)\n", outputPath, len(exclusions))
-	return nil
+	return outputPath
 }
 
-// outputTitusResults writes scan results to stdout and, if configured, to output files.
+// outputTitusResults prints finding one-liners to stdout and, if configured, saves to output files.
 func outputTitusResults(config Config, matches []fileMatch) error {
-	// Always output human-readable text to stdout
-	outputTitusText(os.Stdout, matches)
+	// Print one grep-friendly line per finding to stdout, deduplicating per rule+file.
+	type dedupKey struct{ ruleID, filePath string }
+	seen := make(map[dedupKey]int) // key → count
+	var order []dedupKey
+	for _, fm := range matches {
+		k := dedupKey{fm.match.RuleID, fm.filePath}
+		if seen[k] == 0 {
+			order = append(order, k)
+		}
+		seen[k]++
+	}
+	// Build a lookup for the first match per key (for RuleName)
+	nameOf := make(map[dedupKey]string, len(order))
+	for _, fm := range matches {
+		k := dedupKey{fm.match.RuleID, fm.filePath}
+		if _, ok := nameOf[k]; !ok {
+			nameOf[k] = fm.match.RuleName
+		}
+	}
+	for _, k := range order {
+		count := seen[k]
+		countSuffix := ""
+		if count > 1 {
+			countSuffix = fmt.Sprintf(" (%d matches)", count)
+		}
+		fmt.Printf("[%s] %s at %s%s\n", k.ruleID, nameOf[k], k.filePath, countSuffix)
+	}
 
 	if config.SaveOutput && config.OutputFile != "" {
 		var formats []string
