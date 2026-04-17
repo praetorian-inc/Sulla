@@ -5,7 +5,7 @@ go 1.25.3
 require (
 	github.com/go-ldap/ldap/v3 v3.4.12
 	github.com/hirochachacha/go-smb2 v1.1.0
-	github.com/praetorian-inc/titus v0.0.0
+	github.com/praetorian-inc/titus v1.1.24
 )
 
 require (
@@ -68,5 +68,3 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 	modernc.org/sqlite v1.45.0 // indirect
 )
-
-replace github.com/praetorian-inc/titus => ../titus

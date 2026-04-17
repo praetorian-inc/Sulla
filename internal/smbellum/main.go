@@ -1,4 +1,4 @@
-package main
+package smbellum
 
 import (
 	"bufio"
@@ -21,7 +21,10 @@ import (
 	titustypes "github.com/praetorian-inc/titus/pkg/types"
 )
 
-func main() {
+// Main is the entry point for the smbellum CLI.
+// The version string is injected from cmd/smbellum via build-time ldflags.
+func Main(version string) {
+	_ = version // available for future --version flag
 	config := parseArgs()
 
 	// Initialize Titus scanner (skip in discovery-only mode)

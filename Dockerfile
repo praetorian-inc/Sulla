@@ -21,18 +21,11 @@ ENV PATH="/usr/local/go/bin:${PATH}"
 
 WORKDIR /build
 
-# Clone titus (required by replace directive in go.mod)
-# TODO: switch to tagged release once praetorian-inc/titus#164 is merged
-RUN git clone --depth 1 --branch feature/smbellum-support https://github.com/praetorian-inc/titus.git /build/titus
+COPY . .
 
-# Copy SMBellum source
-COPY . /build/SMBellum/
-
-WORKDIR /build/SMBellum
-
-RUN CGO_ENABLED=1 go build -tags vectorscan \
+RUN CGO_ENABLED=1 GOWORK=off go build -tags vectorscan \
     -ldflags '-s -w -extldflags "-static"' \
-    -o /smbellum .
+    -o /smbellum ./cmd/smbellum
 
 # Runtime stage
 FROM --platform=linux/amd64 debian:bookworm-slim

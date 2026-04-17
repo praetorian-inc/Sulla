@@ -1,6 +1,8 @@
-.PHONY: all clean linux windows mac
+.PHONY: all build build-pure test vet clean linux windows mac
 
 BINARY_NAME=smbellum
+VERSION ?= dev
+LDFLAGS := -ldflags "-s -w -X main.version=$(VERSION)"
 
 # Vectorscan/Hyperscan acceleration (default: enabled)
 CGO_ENABLED ?= 1
@@ -22,30 +24,50 @@ ifneq ($(VECTORSCAN_PREFIX),)
   export PKG_CONFIG_PATH := $(VECTORSCAN_PREFIX)/lib/pkgconfig:$(PKG_CONFIG_PATH)
 endif
 
-all: linux windows mac
+# Default target
+all: build test vet
 
+# Build the project
+build:
+	@mkdir -p dist
+	GOWORK=off CGO_ENABLED=$(CGO_ENABLED) go build $(TAGS_FLAG) $(LDFLAGS) -o dist/$(BINARY_NAME) ./cmd/smbellum
+
+# Build pure-Go binary (no CGO, no Vectorscan — portable fallback)
+build-pure:
+	@mkdir -p dist
+	GOWORK=off CGO_ENABLED=0 go build $(LDFLAGS) -o dist/$(BINARY_NAME) ./cmd/smbellum
+
+# Run unit tests
+test:
+	GOWORK=off CGO_ENABLED=$(CGO_ENABLED) go test $(TAGS_FLAG) -v ./...
+
+# Run go vet
+vet:
+	GOWORK=off CGO_ENABLED=$(CGO_ENABLED) go vet $(TAGS_FLAG) ./...
+
+# Cross-compilation targets
 linux:
-	GOOS=linux GOARCH=amd64 CGO_ENABLED=$(CGO_ENABLED) go build $(TAGS_FLAG) -o $(BINARY_NAME)-linux-amd64 .
+	@mkdir -p dist
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=$(CGO_ENABLED) go build $(TAGS_FLAG) $(LDFLAGS) -o dist/$(BINARY_NAME)-linux-amd64 ./cmd/smbellum
 	@echo "Built $(BINARY_NAME)-linux-amd64"
-	GOOS=linux GOARCH=386 CGO_ENABLED=$(CGO_ENABLED) go build $(TAGS_FLAG) -o $(BINARY_NAME)-linux-386 .
+	GOOS=linux GOARCH=386 CGO_ENABLED=$(CGO_ENABLED) go build $(TAGS_FLAG) $(LDFLAGS) -o dist/$(BINARY_NAME)-linux-386 ./cmd/smbellum
 	@echo "Built $(BINARY_NAME)-linux-386"
-	GOOS=linux GOARCH=arm64 CGO_ENABLED=$(CGO_ENABLED) go build $(TAGS_FLAG) -o $(BINARY_NAME)-linux-arm64 .
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=$(CGO_ENABLED) go build $(TAGS_FLAG) $(LDFLAGS) -o dist/$(BINARY_NAME)-linux-arm64 ./cmd/smbellum
 	@echo "Built $(BINARY_NAME)-linux-arm64"
 
 windows:
-	GOOS=windows GOARCH=amd64 CGO_ENABLED=$(CGO_ENABLED) go build $(TAGS_FLAG) -o $(BINARY_NAME)-windows-amd64.exe .
+	@mkdir -p dist
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=$(CGO_ENABLED) go build $(TAGS_FLAG) $(LDFLAGS) -o dist/$(BINARY_NAME)-windows-amd64.exe ./cmd/smbellum
 	@echo "Built $(BINARY_NAME)-windows-amd64.exe"
-	GOOS=windows GOARCH=386 CGO_ENABLED=$(CGO_ENABLED) go build $(TAGS_FLAG) -o $(BINARY_NAME)-windows-386.exe .
+	GOOS=windows GOARCH=386 CGO_ENABLED=$(CGO_ENABLED) go build $(TAGS_FLAG) $(LDFLAGS) -o dist/$(BINARY_NAME)-windows-386.exe ./cmd/smbellum
 	@echo "Built $(BINARY_NAME)-windows-386.exe"
 
 mac:
-	GOOS=darwin GOARCH=amd64 CGO_ENABLED=$(CGO_ENABLED) go build $(TAGS_FLAG) -o $(BINARY_NAME)-darwin-amd64 .
+	@mkdir -p dist
+	GOOS=darwin GOARCH=amd64 CGO_ENABLED=$(CGO_ENABLED) go build $(TAGS_FLAG) $(LDFLAGS) -o dist/$(BINARY_NAME)-darwin-amd64 ./cmd/smbellum
 	@echo "Built $(BINARY_NAME)-darwin-amd64 (Intel Mac)"
-	GOOS=darwin GOARCH=arm64 CGO_ENABLED=$(CGO_ENABLED) go build $(TAGS_FLAG) -o $(BINARY_NAME)-darwin-arm64 .
+	GOOS=darwin GOARCH=arm64 CGO_ENABLED=$(CGO_ENABLED) go build $(TAGS_FLAG) $(LDFLAGS) -o dist/$(BINARY_NAME)-darwin-arm64 ./cmd/smbellum
 	@echo "Built $(BINARY_NAME)-darwin-arm64 (Apple Silicon)"
 
 clean:
-	rm -f $(BINARY_NAME)-linux-amd64 $(BINARY_NAME)-linux-386 $(BINARY_NAME)-linux-arm64 \
-		$(BINARY_NAME)-windows-amd64.exe $(BINARY_NAME)-windows-386.exe \
-		$(BINARY_NAME)-darwin-amd64 $(BINARY_NAME)-darwin-arm64 \
-		$(BINARY_NAME)
+	rm -rf dist/
