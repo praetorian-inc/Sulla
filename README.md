@@ -198,7 +198,9 @@ Use `--show-default-exclusions` to see the complete list, or `--no-default-exclu
 | `json` | JSON format for programmatic processing |
 | `jsonl` | JSON Lines format (one finding per line) |
 | `sarif` | SARIF format for integration with security tools |
-| `tabularium` | [Tabularium](https://github.com/praetorian-inc/tabularium) format (discovery mode only). Secret match values are automatically redacted from proof content |
+| `tabularium` | [Tabularium](https://github.com/praetorian-inc/tabularium) format (discovery mode only). The tabularium evidence blob redacts match values from its embedded proof content |
+
+> **Note:** Redaction applies only to the `tabularium` format. The `txt`, `json`, `jsonl`, and `sarif` outputs contain raw match content and should be handled as sensitive.
 
 
 ## Notes

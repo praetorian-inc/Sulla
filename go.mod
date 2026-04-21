@@ -1,4 +1,4 @@
-module SMBellum
+module github.com/praetorian-inc/SMBellum
 
 go 1.25.3
 

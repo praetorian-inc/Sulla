@@ -24,8 +24,7 @@ import (
 // Main is the entry point for the smbellum CLI.
 // The version string is injected from cmd/smbellum via build-time ldflags.
 func Main(version string) {
-	_ = version // available for future --version flag
-	config := parseArgs()
+	config := parseArgs(version)
 
 	// Initialize Titus scanner (skip in discovery-only mode)
 	if !config.DiscoveryOnly {
@@ -518,13 +517,14 @@ func parseTargetLine(line string) (host, share string, err error) {
 	return "", "", fmt.Errorf("invalid format (expected 'host,share' or '\\\\host\\share')")
 }
 
-func parseArgs() Config {
+func parseArgs(version string) Config {
 	var config Config
 	var additionalExts string
 	var additionalFolders string
 	var keywords string
 	var excludedShares string
 	var outputFormats string
+	var showVersion bool
 
 	// Pre-process -o flag (supports optional argument) before flag.Parse()
 	config.SaveOutput, config.OutputFile, os.Args = extractOutputFlag(os.Args)
@@ -603,6 +603,8 @@ func parseArgs() Config {
 	flag.IntVar(&config.FileWorkers, "file-workers", 0, "Number of parallel file scanning goroutines per share (default: NumCPU)")
 	flag.IntVar(&config.FileWorkers, "jf", 0, "Number of parallel file scanning goroutines per share (shorthand)")
 
+	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
+
 	flag.Usage = func() {
 		logf("Usage: %s [options]\n\n", os.Args[0])
 		logln("A tool to mount SMB shares and scan for secrets using Titus")
@@ -674,6 +676,11 @@ func parseArgs() Config {
 	}
 
 	flag.Parse()
+
+	if showVersion {
+		fmt.Println(version)
+		os.Exit(0)
+	}
 
 	// Quick mode: apply defaults for depth and share time unless explicitly overridden
 	if config.QuickMode {
@@ -763,7 +770,7 @@ func parseArgs() Config {
 		for _, format := range strings.Split(outputFormats, ",") {
 			format = strings.TrimSpace(strings.ToLower(format))
 			if !validFormats[format] {
-				logf("Error: Invalid output format '%s'. Valid formats: txt, json, jsonl, sarif\n", format)
+				logf("Error: Invalid output format '%s'. Valid formats: txt, json, jsonl, sarif, tabularium\n", format)
 				os.Exit(1)
 			}
 			config.OutputFormats = append(config.OutputFormats, format)
