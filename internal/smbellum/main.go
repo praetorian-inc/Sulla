@@ -573,7 +573,7 @@ func parseArgs(version string) Config {
 
 	// Discovery options (LDAPS and channel binding)
 	flag.BoolVar(&config.UseLDAPS, "ldaps", false, "Force LDAPS (port 636); by default all methods are auto-negotiated")
-	flag.BoolVar(&config.ChannelBinding, "channel-binding", false, "Force LDAPS with channel binding (NTLM); by default auto-negotiated")
+	flag.BoolVar(&config.ChannelBinding, "channel-binding", false, "Require NTLMv2+CBT on LDAPS; refuse simple-bind fallback (prevents cleartext credential exposure)")
 	flag.StringVar(&config.DNSServer, "dns-server", "", "Custom DNS server IP for hostname resolution")
 	flag.StringVar(&config.DNSServer, "dns", "", "Custom DNS server IP (shorthand)")
 	flag.BoolVar(&config.DiscoveryOnly, "discovery-only", false, "Discovery only: output shares in UNC format without scanning")
@@ -620,7 +620,7 @@ func parseArgs(version string) Config {
 		logln("  -domain, -d         Domain for authentication (required for discovery, e.g., corp.local)")
 		logln("\nDiscovery Options (auto-negotiated by default: LDAPS+CB → LDAPS → LDAP):")
 		logln("  --ldaps             Force LDAPS only (skip plain LDAP fallback)")
-		logln("  --channel-binding   Force LDAPS with channel binding only (no fallback)")
+		logln("  --channel-binding   Require NTLMv2 with RFC 5929 channel binding; no simple-bind fallback")
 		logln("  --dns-server, -dns  Custom DNS server IP for DC discovery and hostname resolution")
 		logln("  --discovery-only, -do  Discovery only: output shares in UNC format, skip scanning")
 		logln("  --no-dfs              Disable DFS namespace awareness (skip DFS deduplication)")
@@ -680,6 +680,10 @@ func parseArgs(version string) Config {
 	if showVersion {
 		fmt.Println(version)
 		os.Exit(0)
+	}
+
+	if config.ChannelBinding {
+		logln("Notice: --channel-binding semantics changed. It now REQUIRES NTLMv2+CBT and refuses simple-bind fallback. See CHANGELOG.md. Drop the flag to restore the previous auto-negotiation behavior (now the default).")
 	}
 
 	// Quick mode: apply defaults for depth and share time unless explicitly overridden

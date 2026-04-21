@@ -44,7 +44,7 @@ type Config struct {
 	TargetsFile       string
 	DomainController  string
 	UseLDAPS          bool             // Use LDAPS (port 636) instead of LDAP (port 389)
-	ChannelBinding    bool             // Enable LDAP channel binding (requires TLS)
+	ChannelBinding    bool             // Require NTLMv2+CBT on LDAPS; disables simple-bind fallback
 	DNSServer         string           // Custom DNS server IP for lookups
 	DiscoveryOnly     bool             // Discovery-only mode: output shares without scanning
 	DiscoveryResult   *DiscoveryResult // AD discovery metadata for tabularium output

@@ -150,7 +150,7 @@ smbellum -h fileserver.corp.local -s SYSVOL -u admin -p secret123 -d corp.local
 | Flag | Description |
 |------|-------------|
 | `--ldaps` | Use LDAPS (port 636) instead of LDAP (port 389) |
-| `--channel-binding` | Enable LDAP channel binding (requires `--ldaps`) |
+| `--channel-binding` | Require NTLMv2 with RFC 5929 channel binding on LDAPS; refuse fallback to simple bind (prevents cleartext credential exposure on CBT-enforced DCs) |
 | `--dns-server`, `-dns` | Custom DNS server IP for hostname resolution |
 | `--discovery-only`, `-do` | Discovery only: output shares in UNC format without scanning |
 
