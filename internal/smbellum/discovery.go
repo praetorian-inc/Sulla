@@ -271,8 +271,8 @@ func connectToLDAP(dc string, config Config) (*ldap.Conn, string, error) {
 		var lastErr error
 		l, err := ldap.DialURL(fmt.Sprintf("ldaps://%s:636", dcAddr), ldap.DialWithTLSConfig(tlsConfig))
 		if err == nil {
-			if bindErr := l.NTLMBind(config.Domain, config.Username, config.Password); bindErr == nil {
-				return l, "LDAPS with channel binding (NTLM)", nil
+			if bindErr := bindNTLMWithCBT(ntlmChallengeBindAdapter{c: l}, config); bindErr == nil {
+				return l, "LDAPS (NTLMv2 + channel binding)", nil
 			} else {
 				lastErr = bindErr
 			}
