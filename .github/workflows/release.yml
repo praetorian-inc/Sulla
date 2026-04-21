@@ -27,9 +27,27 @@ env:
   VERSION: ${{ inputs.version || github.ref_name }}
 
 jobs:
+  # Validate version format before any build runs so that a malformed
+  # workflow_dispatch input cannot flow into shell steps that embed it.
+  validate:
+    name: Validate version
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Check version format
+      env:
+        VERSION: ${{ env.VERSION }}
+      run: |
+        if ! printf '%s' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$'; then
+          echo "Invalid version '$VERSION'"
+          echo "Expected format: vMAJOR.MINOR.PATCH[-PRERELEASE] (e.g. v1.2.3, v1.2.3-rc1)"
+          exit 1
+        fi
+        echo "Version '$VERSION' is valid"
+
   # Build Linux amd64 with Intel hyperscan (static)
   build-linux-amd64:
     name: Build Linux amd64
+    needs: validate
     runs-on: ubuntu-22.04
 
     steps:
@@ -49,8 +67,11 @@ jobs:
 
     - name: Build hyperscan static library
       run: |
-        git clone --depth 1 --branch v5.4.2 https://github.com/intel/hyperscan.git /tmp/hyperscan
+        # Pinned to commit SHA of intel/hyperscan v5.4.2 (tags are mutable, commits are not)
+        HS_COMMIT=bc3b191ab56055e8560c7cdc161c289c4d76e3d2
+        git clone https://github.com/intel/hyperscan.git /tmp/hyperscan
         cd /tmp/hyperscan
+        git checkout "$HS_COMMIT"
         mkdir build && cd build
         cmake .. \
           -DCMAKE_BUILD_TYPE=Release \
@@ -67,7 +88,7 @@ jobs:
         CGO_LDFLAGS: "-L/usr/local/lib -lhs -lstdc++ -lm"
       run: |
         mkdir -p dist
-        GOWORK=off go build -tags "cgo vectorscan" -ldflags '-s -w -extldflags "-static" -X main.version=${{ env.VERSION }}' -o dist/smbellum-linux-amd64 ./cmd/smbellum
+        GOWORK=off go build -tags "cgo vectorscan" -ldflags "-s -w -extldflags \"-static\" -X main.version=${VERSION}" -o dist/smbellum-linux-amd64 ./cmd/smbellum
         chmod +x dist/smbellum-linux-amd64
         file dist/smbellum-linux-amd64
         ldd dist/smbellum-linux-amd64 || true
@@ -81,6 +102,7 @@ jobs:
   # Build Linux arm64 with vectorscan (ARM port of hyperscan)
   build-linux-arm64:
     name: Build Linux arm64
+    needs: validate
     runs-on: ubuntu-22.04-arm
 
     steps:
@@ -100,8 +122,11 @@ jobs:
 
     - name: Build vectorscan static library
       run: |
-        git clone --depth 1 --branch vectorscan/5.4.11 https://github.com/VectorCamp/vectorscan.git /tmp/vectorscan
+        # Pinned to commit SHA of VectorCamp/vectorscan vectorscan/5.4.11 (tags are mutable, commits are not)
+        VS_COMMIT=d29730e1cb9daaa66bda63426cdce83505d2c809
+        git clone https://github.com/VectorCamp/vectorscan.git /tmp/vectorscan
         cd /tmp/vectorscan
+        git checkout "$VS_COMMIT"
         mkdir build && cd build
         cmake .. \
           -DCMAKE_BUILD_TYPE=Release \
@@ -118,7 +143,7 @@ jobs:
         CGO_LDFLAGS: "-L/usr/local/lib -lhs -lstdc++ -lm"
       run: |
         mkdir -p dist
-        GOWORK=off go build -tags "cgo vectorscan" -ldflags '-s -w -extldflags "-static" -X main.version=${{ env.VERSION }}' -o dist/smbellum-linux-arm64 ./cmd/smbellum
+        GOWORK=off go build -tags "cgo vectorscan" -ldflags "-s -w -extldflags \"-static\" -X main.version=${VERSION}" -o dist/smbellum-linux-arm64 ./cmd/smbellum
         chmod +x dist/smbellum-linux-arm64
         file dist/smbellum-linux-arm64
         ldd dist/smbellum-linux-arm64 || true
@@ -132,6 +157,7 @@ jobs:
   # Build macOS binaries (static vectorscan/hyperscan linked in)
   build-macos:
     name: Build macOS ${{ matrix.arch }}
+    needs: validate
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -140,11 +166,13 @@ jobs:
           - arch: arm64
             runner: macos-14
             hs_repo: https://github.com/VectorCamp/vectorscan.git
-            hs_branch: vectorscan/5.4.11
+            # Commit SHA of VectorCamp/vectorscan tag vectorscan/5.4.11
+            hs_commit: d29730e1cb9daaa66bda63426cdce83505d2c809
           - arch: amd64
             runner: macos-15-intel
             hs_repo: https://github.com/intel/hyperscan.git
-            hs_branch: v5.4.2
+            # Commit SHA of intel/hyperscan tag v5.4.2
+            hs_commit: bc3b191ab56055e8560c7cdc161c289c4d76e3d2
 
     steps:
     - name: Checkout code
@@ -161,9 +189,13 @@ jobs:
         brew install cmake ragel pkg-config boost pcre
 
     - name: Build hyperscan/vectorscan static library
+      env:
+        HS_REPO: ${{ matrix.hs_repo }}
+        HS_COMMIT: ${{ matrix.hs_commit }}
       run: |
-        git clone --depth 1 --branch ${{ matrix.hs_branch }} ${{ matrix.hs_repo }} /tmp/hs-src
+        git clone "$HS_REPO" /tmp/hs-src
         cd /tmp/hs-src
+        git checkout "$HS_COMMIT"
         mkdir build && cd build
         cmake .. \
           -DCMAKE_BUILD_TYPE=Release \
@@ -211,7 +243,7 @@ jobs:
         export CGO_LDFLAGS="/tmp/hs-install/lib/libhs.a -lc++"
 
         mkdir -p dist
-        GOWORK=off go build -tags "cgo vectorscan" -ldflags '-s -w -X main.version=${{ env.VERSION }}' -o dist/smbellum-darwin-${{ matrix.arch }} ./cmd/smbellum
+        GOWORK=off go build -tags "cgo vectorscan" -ldflags "-s -w -X main.version=${VERSION}" -o dist/smbellum-darwin-${{ matrix.arch }} ./cmd/smbellum
         chmod +x dist/smbellum-darwin-${{ matrix.arch }}
         file dist/smbellum-darwin-${{ matrix.arch }}
         otool -L dist/smbellum-darwin-${{ matrix.arch }}
@@ -225,6 +257,7 @@ jobs:
   # Build Windows binary using MSYS2/MinGW (compatible with Go CGO)
   build-windows:
     name: Build Windows amd64
+    needs: validate
     runs-on: windows-2022
 
     defaults:
@@ -257,8 +290,11 @@ jobs:
 
     - name: Build vectorscan static library with MinGW
       run: |
-        git clone --depth 1 --branch vectorscan/5.4.11 https://github.com/VectorCamp/vectorscan.git /tmp/vectorscan
+        # Pinned to commit SHA of VectorCamp/vectorscan vectorscan/5.4.11 (tags are mutable, commits are not)
+        VS_COMMIT=d29730e1cb9daaa66bda63426cdce83505d2c809
+        git clone https://github.com/VectorCamp/vectorscan.git /tmp/vectorscan
         cd /tmp/vectorscan
+        git checkout "$VS_COMMIT"
         mkdir build && cd build
         cmake .. \
           -G "MinGW Makefiles" \
@@ -322,7 +358,7 @@ jobs:
         pkg-config --cflags --libs libhs
 
         mkdir -p dist
-        go build -tags "cgo vectorscan" -ldflags '-s -w -extldflags "-static" -X main.version=${{ env.VERSION }}' -o dist/smbellum-windows-amd64.exe ./cmd/smbellum
+        go build -tags "cgo vectorscan" -ldflags "-s -w -extldflags \"-static\" -X main.version=${VERSION}" -o dist/smbellum-windows-amd64.exe ./cmd/smbellum
         ls -la dist/
 
     - name: Upload artifact
