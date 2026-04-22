@@ -3,6 +3,7 @@ module github.com/praetorian-inc/SMBellum
 go 1.25.3
 
 require (
+	github.com/Azure/go-ntlmssp v0.0.0-20221128193559-754e69321358
 	github.com/go-ldap/ldap/v3 v3.4.12
 	github.com/hirochachacha/go-smb2 v1.1.0
 	github.com/praetorian-inc/titus v1.1.24
@@ -10,9 +11,10 @@ require (
 
 replace github.com/Azure/go-ntlmssp => ./third_party/go-ntlmssp
 
+replace github.com/hirochachacha/go-smb2 => ./third_party/go-smb2
+
 require (
 	dario.cat/mergo v1.0.0 // indirect
-	github.com/Azure/go-ntlmssp v0.0.0-20221128193559-754e69321358 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/ProtonMail/go-crypto v1.1.6 // indirect
 	github.com/andybalholm/brotli v1.1.1 // indirect
