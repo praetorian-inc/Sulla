@@ -20,9 +20,28 @@
 - LDAPS+NTLM success message changed from `"LDAPS with channel binding
   (NTLM)"` to `"LDAPS (NTLMv2 + channel binding)"`.
 
+### Fixed
+- **Discovery crash on large AD environments.** Fixed a
+  `runtime error: slice bounds out of range [:48] with capacity 0`
+  panic originating from a go-smb2 runtime finalizer. The panic was
+  reliably reproducible with `--domain-controller` scanning across
+  thousands of hosts where a subset enforced SMB signing or reset TCP
+  mid-RPC. Root cause was an unchecked short-read in go-smb2's
+  `PacketCodec` and `session.recv` paths, exercised by a race between
+  `outstandingRequests.shutdown` and a late garbage-collector-driven
+  `*File.close` finalizer (typically on the `srvsvc` named pipe opened
+  inside `(*Session).ListSharenames`). Fixed in the in-tree fork at
+  `third_party/go-smb2` (see `NOTICE.md`).
+
 ### Dependencies
 - `github.com/Azure/go-ntlmssp` now resolves to an in-tree fork at
   `./third_party/go-ntlmssp` (via go.mod `replace` directive). The fork is
   identical to upstream commit `754e69321358` plus a ~60 LoC patch that
   adds `NewAuthenticateMessageWithCBT` for channel-binding injection. See
   `third_party/go-ntlmssp/NOTICE.md`.
+- `github.com/hirochachacha/go-smb2` now resolves to an in-tree fork at
+  `./third_party/go-smb2` (via go.mod `replace` directive). The fork is
+  identical to upstream tag `v1.1.0` plus ~30 LoC of bounds guards in
+  `internal/smb2/packet.go`, `session.go`, and `conn.go` that prevent
+  the finalizer-driven panic documented under "Fixed". See
+  `third_party/go-smb2/NOTICE.md` for the full set of modifications.
