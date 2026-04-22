@@ -302,6 +302,15 @@ func (s *session) recv(rr *requestResponse) (pkt []byte, err error) {
 	if err != nil {
 		return nil, err
 	}
+	// An SMB2 packet must be at least a 64-byte header. A shorter response
+	// means the underlying transport produced a malformed or empty frame
+	// (e.g., connection closed while the response channel was drained).
+	// Surface it as a response-level error rather than indexing into the
+	// buffer and panicking. Fixes Praetorian smbellum crash when a GC
+	// finalizer closes an orphaned *File on a torn-down session.
+	if len(pkt) < 64 {
+		return nil, &InvalidResponseError{fmt.Sprintf("short response: %d bytes", len(pkt))}
+	}
 	if sessionId := PacketCodec(pkt).SessionId(); sessionId != s.sessionId {
 		return nil, &InvalidResponseError{fmt.Sprintf("expected session id: %v, got %v", s.sessionId, sessionId)}
 	}
