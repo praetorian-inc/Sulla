@@ -150,9 +150,38 @@ smbellum -h fileserver.corp.local -s SYSVOL -u admin -p secret123 -d corp.local
 | Flag | Description |
 |------|-------------|
 | `--ldaps` | Use LDAPS (port 636) instead of LDAP (port 389) |
-| `--channel-binding` | Enable LDAP channel binding (requires `--ldaps`) |
+| `--channel-binding` | Require NTLMv2 with RFC 5929 channel binding on LDAPS; refuse fallback to simple bind (prevents cleartext credential exposure on CBT-enforced DCs) |
 | `--dns-server`, `-dns` | Custom DNS server IP for hostname resolution |
 | `--discovery-only`, `-do` | Discovery only: output shares in UNC format without scanning |
+
+### LDAP Authentication Behavior
+
+SMBellum auto-negotiates the strongest LDAP auth available per DC:
+
+1. **LDAPS with NTLMv2 + channel binding** — RFC 5929 `tls-server-end-point`
+   CBT is embedded as the NTLMv2 `MsvAvChannelBindings` AV pair, so the bind
+   succeeds against Server 2022/2025 DCs with "LDAP server channel binding
+   token requirements = Always".
+2. **LDAPS + simple bind** — fallback when NTLMv2 fails. Credentials transit
+   as cleartext inside the TLS tunnel; use only when the TLS channel is trusted.
+3. **Plain LDAP + simple bind (port 389)** — last resort for legacy DCs without
+   LDAPS. Credentials are cleartext on the wire.
+
+Use `--channel-binding` to require attempt 1 and refuse fallback — this
+guarantees the operator's password never transits as cleartext, even inside
+TLS, at the cost of failing against non-CBT DCs.
+
+LDAPS certificate validation is disabled by default (matches impacket, NetExec,
+BloodHound.py) because internal CA / self-signed certs are the norm in AD
+environments.
+
+### Note on NTLMSSP implementation
+
+Channel binding required patching `github.com/Azure/go-ntlmssp` (already a
+transitive dep via go-ldap) to inject the `MsvAvChannelBindings` AV pair. The
+patched copy lives in-tree at `third_party/go-ntlmssp/` and is wired via a
+`replace` directive in `go.mod`. Upstream remains MIT-licensed; see
+`third_party/go-ntlmssp/NOTICE.md` for details on modifications.
 
 ### Filtering
 
@@ -198,7 +227,9 @@ Use `--show-default-exclusions` to see the complete list, or `--no-default-exclu
 | `json` | JSON format for programmatic processing |
 | `jsonl` | JSON Lines format (one finding per line) |
 | `sarif` | SARIF format for integration with security tools |
-| `tabularium` | [Tabularium](https://github.com/praetorian-inc/tabularium) format (discovery mode only). Secret match values are automatically redacted from proof content |
+| `tabularium` | [Tabularium](https://github.com/praetorian-inc/tabularium) format (discovery mode only). The tabularium evidence blob redacts match values from its embedded proof content |
+
+> **Note:** Redaction applies only to the `tabularium` format. The `txt`, `json`, `jsonl`, and `sarif` outputs contain raw match content and should be handled as sensitive.
 
 
 ## Notes

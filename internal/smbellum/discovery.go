@@ -229,15 +229,17 @@ func discoverDomainControllers(domain, dnsServer string) ([]string, error) {
 }
 
 // connectToLDAP establishes an LDAP connection to the specified domain controller.
-// It returns the connection, a description of the method used, and any error.
+// Returns the connection, a description of the method used, and any error.
 //
-// Auto-negotiation (default when neither --ldaps nor --channel-binding is set):
-//  1. LDAPS + channel binding (NTLM bind on port 636)
-//  2. LDAPS + simple bind (port 636)
-//  3. Plain LDAP (port 389)
+// Auto-negotiation (default, no flags):
+//  1. LDAPS + NTLMv2 with RFC 5929 channel binding (port 636)
+//  2. LDAPS + simple bind (port 636) — credentials transit cleartext inside TLS
+//  3. Plain LDAP + simple bind (port 389) — credentials cleartext on the wire
 //
-// When --ldaps is set, only LDAPS methods are tried (skips plain LDAP).
-// When --channel-binding is set, only LDAPS + NTLM is tried.
+// --ldaps: attempts 1 and 2 only; plain LDAP skipped.
+// --channel-binding: attempt 1 only; failure returns an error rather than
+//   falling back to simple bind. Use to guarantee the operator's password
+//   never transits as cleartext, even inside a TLS tunnel.
 func connectToLDAP(dc string, config Config) (*ldap.Conn, string, error) {
 	// Resolve DC hostname using custom DNS server if configured
 	dcAddr := dc
@@ -271,8 +273,8 @@ func connectToLDAP(dc string, config Config) (*ldap.Conn, string, error) {
 		var lastErr error
 		l, err := ldap.DialURL(fmt.Sprintf("ldaps://%s:636", dcAddr), ldap.DialWithTLSConfig(tlsConfig))
 		if err == nil {
-			if bindErr := l.NTLMBind(config.Domain, config.Username, config.Password); bindErr == nil {
-				return l, "LDAPS with channel binding (NTLM)", nil
+			if bindErr := bindNTLMWithCBT(ntlmChallengeBindAdapter{c: l}, config); bindErr == nil {
+				return l, "LDAPS (NTLMv2 + channel binding)", nil
 			} else {
 				lastErr = bindErr
 			}
@@ -280,9 +282,12 @@ func connectToLDAP(dc string, config Config) (*ldap.Conn, string, error) {
 		} else {
 			lastErr = err
 		}
-		// If channel-binding was explicitly requested, don't fall back
-		if config.ChannelBinding && !config.UseLDAPS {
-			return nil, "", fmt.Errorf("LDAPS with channel binding failed for %s: %w", dc, lastErr)
+		// --channel-binding: refuse fallback so credentials never leak as
+		// cleartext (even inside the TLS tunnel of a simple bind).
+		if config.ChannelBinding {
+			return nil, "", fmt.Errorf(
+				"NTLMv2+CBT bind failed for %s (--channel-binding refuses simple-bind fallback): %w",
+				dc, lastErr)
 		}
 	}
 

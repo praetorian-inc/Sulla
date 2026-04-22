@@ -1,16 +1,20 @@
-module SMBellum
+module github.com/praetorian-inc/SMBellum
 
 go 1.25.3
 
 require (
+	github.com/Azure/go-ntlmssp v0.0.0-20221128193559-754e69321358
 	github.com/go-ldap/ldap/v3 v3.4.12
 	github.com/hirochachacha/go-smb2 v1.1.0
 	github.com/praetorian-inc/titus v1.1.24
 )
 
+replace github.com/Azure/go-ntlmssp => ./third_party/go-ntlmssp
+
+replace github.com/hirochachacha/go-smb2 => ./third_party/go-smb2
+
 require (
 	dario.cat/mergo v1.0.0 // indirect
-	github.com/Azure/go-ntlmssp v0.0.0-20221128193559-754e69321358 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/ProtonMail/go-crypto v1.1.6 // indirect
 	github.com/andybalholm/brotli v1.1.1 // indirect
@@ -53,13 +57,13 @@ require (
 	github.com/xanzy/ssh-agent v0.3.3 // indirect
 	gitlab.com/gitlab-org/api/client-go v1.22.0 // indirect
 	go4.org v0.0.0-20200411211856-f5505b9728dd // indirect
-	golang.org/x/crypto v0.45.0 // indirect
+	golang.org/x/crypto v0.50.0 // indirect
 	golang.org/x/exp v0.0.0-20251023183803-a4bb9ffd2546 // indirect
-	golang.org/x/net v0.47.0 // indirect
+	golang.org/x/net v0.52.0 // indirect
 	golang.org/x/oauth2 v0.34.0 // indirect
-	golang.org/x/sync v0.19.0 // indirect
-	golang.org/x/sys v0.39.0 // indirect
-	golang.org/x/text v0.32.0 // indirect
+	golang.org/x/sync v0.20.0 // indirect
+	golang.org/x/sys v0.43.0 // indirect
+	golang.org/x/text v0.36.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
