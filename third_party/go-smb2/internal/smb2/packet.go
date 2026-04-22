@@ -117,6 +117,9 @@ func (p PacketCodec) SetCreditCharge(u uint16) {
 }
 
 func (p PacketCodec) Status() uint32 {
+	if len(p) < 12 {
+		return 0
+	}
 	return le.Uint32(p[8:12])
 }
 
@@ -125,6 +128,9 @@ func (p PacketCodec) SetStatus(u uint32) {
 }
 
 func (p PacketCodec) Command() uint16 {
+	if len(p) < 14 {
+		return 0
+	}
 	return le.Uint16(p[12:14])
 }
 
@@ -149,6 +155,9 @@ func (p PacketCodec) SetCreditResponse(u uint16) {
 }
 
 func (p PacketCodec) Flags() uint32 {
+	if len(p) < 20 {
+		return 0
+	}
 	return le.Uint32(p[16:20])
 }
 
@@ -157,6 +166,9 @@ func (p PacketCodec) SetFlags(u uint32) {
 }
 
 func (p PacketCodec) NextCommand() uint32 {
+	if len(p) < 24 {
+		return 0
+	}
 	return le.Uint32(p[20:24])
 }
 
@@ -165,6 +177,9 @@ func (p PacketCodec) SetNextCommand(u uint32) {
 }
 
 func (p PacketCodec) MessageId() uint64 {
+	if len(p) < 32 {
+		return 0
+	}
 	return le.Uint64(p[24:32])
 }
 
@@ -173,6 +188,9 @@ func (p PacketCodec) SetMessageId(u uint64) {
 }
 
 func (p PacketCodec) AsyncId() uint64 {
+	if len(p) < 40 {
+		return 0
+	}
 	return le.Uint64(p[32:40])
 }
 
@@ -181,6 +199,9 @@ func (p PacketCodec) SetAsyncId(u uint64) {
 }
 
 func (p PacketCodec) TreeId() uint32 {
+	if len(p) < 40 {
+		return 0
+	}
 	return le.Uint32(p[36:40])
 }
 
@@ -189,6 +210,9 @@ func (p PacketCodec) SetTreeId(u uint32) {
 }
 
 func (p PacketCodec) SessionId() uint64 {
+	if len(p) < 48 {
+		return 0
+	}
 	return le.Uint64(p[40:48])
 }
 
@@ -197,6 +221,9 @@ func (p PacketCodec) SetSessionId(u uint64) {
 }
 
 func (p PacketCodec) Signature() []byte {
+	if len(p) < 64 {
+		return nil
+	}
 	return p[48:64]
 }
 
@@ -205,6 +232,9 @@ func (p PacketCodec) SetSignature(bs []byte) {
 }
 
 func (p PacketCodec) Data() []byte {
+	if len(p) < 64 {
+		return nil
+	}
 	return p[64:]
 }
 
