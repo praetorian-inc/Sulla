@@ -459,6 +459,39 @@ func outputDiscoveredShares(config Config, targets []Target) {
 	}
 }
 
+// resolveOutputFormats returns the list of formats to write to disk. It strips
+// "tabularium" (handled separately by generateTabulariumOutput) and falls back
+// to ["txt"] when nothing is requested.
+//
+// When tabularium is requested alongside a non-txt format (e.g. -of sarif,tabularium),
+// the .txt file must still be written: the tabularium proof blob is built by
+// reading ScanResult.OutputPath (a .txt path) and passing it through
+// redactProofContent, which depends on the text format's "  Match:" prefix
+// markers. Without this, the proof content degrades to "[Could not read output
+// file: ...]".
+func resolveOutputFormats(requested []string) []string {
+	var out []string
+	hasTabularium := false
+	hasTxt := false
+	for _, f := range requested {
+		if f == "tabularium" {
+			hasTabularium = true
+			continue
+		}
+		if f == "txt" {
+			hasTxt = true
+		}
+		out = append(out, f)
+	}
+	if hasTabularium && !hasTxt {
+		out = append([]string{"txt"}, out...)
+	}
+	if len(out) == 0 {
+		out = []string{"txt"}
+	}
+	return out
+}
+
 // It replaces or appends the appropriate extension based on the format.
 func getOutputFilePath(basePath, format string) string {
 	ext := filepath.Ext(basePath)
@@ -526,15 +559,7 @@ func outputTitusResults(config Config, matches []fileMatch) error {
 	}
 
 	if config.SaveOutput && config.OutputFile != "" {
-		var formats []string
-		for _, f := range config.OutputFormats {
-			if f != "tabularium" {
-				formats = append(formats, f)
-			}
-		}
-		if len(formats) == 0 {
-			formats = []string{"txt"}
-		}
+		formats := resolveOutputFormats(config.OutputFormats)
 
 		for _, format := range formats {
 			outputPath := getOutputFilePath(config.OutputFile, format)
