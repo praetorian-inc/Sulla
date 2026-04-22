@@ -473,9 +473,19 @@ func (conn *conn) makeRequestResponse(req Packet, tc *treeConn, ctx context.Cont
 
 func (conn *conn) recv(rr *requestResponse) ([]byte, error) {
 	select {
-	case pkt := <-rr.recv:
+	case pkt, ok := <-rr.recv:
 		if rr.err != nil {
 			return nil, rr.err
+		}
+		if !ok {
+			// Channel closed without pkt delivery and without rr.err being
+			// set. This happens when outstandingRequests.shutdown(err)
+			// iterates requests registered before shutdown, but a new
+			// request was registered *after* shutdown (e.g., a GC finalizer
+			// firing File.close on a torn-down conn). Treat as transport
+			// error so callers surface InvalidResponseError instead of
+			// panicking downstream on the nil pkt.
+			return nil, &InvalidResponseError{"connection closed during recv"}
 		}
 		return pkt, nil
 	case <-rr.ctx.Done():
