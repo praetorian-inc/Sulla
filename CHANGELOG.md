@@ -21,6 +21,14 @@
   (NTLM)"` to `"LDAPS (NTLMv2 + channel binding)"`.
 
 ### Fixed
+- **Empty tabularium proof content when paired with non-txt formats.** Running
+  `-of sarif,tabularium` (or `jsonl,tabularium`, `json,tabularium`) previously
+  produced a tabularium file whose embedded proof blob degraded to
+  `[Could not read output file: ...]`. The aggregator in
+  `generateTabulariumOutput` reads the per-share `.txt` file and pipes it
+  through `redactProofContent`, but the write loop only fell back to `txt`
+  when the non-tabularium format list was empty. `outputTitusResults` now
+  force-includes `txt` whenever `tabularium` is requested.
 - **Discovery crash on large AD environments.** Fixed a
   `runtime error: slice bounds out of range [:48] with capacity 0`
   panic originating from a go-smb2 runtime finalizer. The panic was

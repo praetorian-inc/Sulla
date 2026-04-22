@@ -135,6 +135,78 @@ func TestRuleSeverity(t *testing.T) {
 	}
 }
 
+func TestResolveOutputFormats(t *testing.T) {
+	tests := []struct {
+		name      string
+		requested []string
+		want      []string
+	}{
+		{
+			name:      "empty falls back to txt",
+			requested: nil,
+			want:      []string{"txt"},
+		},
+		{
+			name:      "txt only",
+			requested: []string{"txt"},
+			want:      []string{"txt"},
+		},
+		{
+			name:      "sarif only",
+			requested: []string{"sarif"},
+			want:      []string{"sarif"},
+		},
+		{
+			name:      "tabularium alone expands to txt",
+			requested: []string{"tabularium"},
+			want:      []string{"txt"},
+		},
+		// Regression: tabularium proof blob is built from the .txt file.
+		// If tabularium is paired with a non-txt format, txt must still be
+		// written so the aggregator in generateTabulariumOutput has content
+		// to redact and embed.
+		{
+			name:      "sarif+tabularium forces txt",
+			requested: []string{"sarif", "tabularium"},
+			want:      []string{"txt", "sarif"},
+		},
+		{
+			name:      "jsonl+tabularium forces txt",
+			requested: []string{"jsonl", "tabularium"},
+			want:      []string{"txt", "jsonl"},
+		},
+		{
+			name:      "txt+sarif+tabularium keeps order, no duplicate txt",
+			requested: []string{"txt", "sarif", "tabularium"},
+			want:      []string{"txt", "sarif"},
+		},
+		{
+			name:      "json+tabularium forces txt prepend",
+			requested: []string{"json", "tabularium"},
+			want:      []string{"txt", "json"},
+		},
+		{
+			name:      "tabularium strips out without duplicating when txt present",
+			requested: []string{"tabularium", "txt"},
+			want:      []string{"txt"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveOutputFormats(tt.requested)
+			if len(got) != len(tt.want) {
+				t.Fatalf("resolveOutputFormats(%v) = %v, want %v", tt.requested, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("resolveOutputFormats(%v) = %v, want %v", tt.requested, got, tt.want)
+				}
+			}
+		})
+	}
+}
+
 func TestGetOutputFilePath(t *testing.T) {
 	tests := []struct {
 		basePath string
