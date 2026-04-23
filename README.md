@@ -122,7 +122,7 @@ smbellum -h fileserver.corp.local -s SYSVOL -u admin -p secret123 -d corp.local 
 | Flag | Description |
 |------|-------------|
 | `--ldaps` | Use LDAPS instead of LDAP |
-| `--channel-binding` | Require NTLMv2 with RFC 5929 channel binding on LDAPS) |
+| `--channel-binding` | Require NTLMv2 with RFC 5929 channel binding on LDAPS |
 | `--dns-server`, `-dns` | Custom DNS server IP for hostname resolution |
 | `--discovery-only`, `-do` | Discovery only: output shares in UNC format without scanning |
 | `--no-dfs` | Disable DFS namespace awareness (skip DFS deduplication) |
