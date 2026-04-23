@@ -14,12 +14,7 @@ You can:
 * Use regex filters to exclude share names, directories, or file types
 * Save output in txt, json, jsonl, or sarif format
 
-![demo](https://github.com/user-attachments/assets/1297a612-7724-4cfa-917d-4c0c09900407)
-
-
-## Requirements
-
-- Titus is built into the SMBellum binary — no external dependencies required
+![demo](https://github.com/user-attachments/assets/bfab2548-e54d-4a48-aa6c-bc299baf983c)
 
 ## Installation
 
@@ -49,17 +44,6 @@ docker run --rm --privileged --network=host \
   -u admin -p secret123 -d corp.local -o results -of txt,json
 ```
 
-For convenience, create an alias:
-
-```bash
-alias smbellum='docker run --rm --privileged --network=host -v $(pwd):/smbellum_output -w /smbellum_output ghcr.io/praetorian-inc/smbellum:latest'
-
-# Then use normally
-smbellum -u admin -p secret123 -d corp.local
-```
-
-> **Note:** Podman users (e.g., Kali) may need to run docker with `sudo`
-
 ## Usage
 
 ### Domain-Wide Share Discovery
@@ -67,17 +51,8 @@ smbellum -u admin -p secret123 -d corp.local
 Automatically discover and scan all accessible SMB shares across an Active Directory domain:
 
 ```bash
-# Auto-discover DC and scan all accessible shares (recommended)
-smbellum -u admin -p secret123 -d corp.local
-
-# Explicitly specify DC (skips auto-discovery)
-smbellum -dc dc01.corp.local -u admin -p secret123 -d corp.local
-
-# Use custom DNS server for DC discovery and hostname resolution
-smbellum -u admin -p secret123 -d corp.local -dns 10.0.0.1
-
-# Save results to a directory in txt and json format
-smbellum -u admin -p secret123 -d corp.local -o results/ -of txt,json
+# Auto-discover all accessible shares in quick mode and write to txt/json
+smbellum -u admin -p secret123 -d corp.local -o results/ -of txt,json --quick
 ```
 
 > SMBellum discovers domain controllers via DNS SRV records (`_ldap._tcp.dc._msdcs.<domain>`). If the first DC is unreachable, it automatically tries others.
@@ -89,9 +64,6 @@ Discover accessible shares without running Titus scans. Outputs UNC paths that c
 ```bash
 # Discover reachable shares without secret scanning
 smbellum -u admin -p secret123 -d corp.local -do -o
-
-# Later, use discovered shares as target file input:
-smbellum -tf corp_local_discovered_smb_shares.txt -u admin -p secret123 -d corp.local
 ```
 
 Useful when:
@@ -104,7 +76,7 @@ Scan a predefined list of shares:
 
 ```bash
 # Scan targets from file
-smbellum -tf targets.txt -u admin -p secret123 -d corp.local
+smbellum -tf corp_local_discovered_smb_shares.txt -u admin -p secret123 -d corp.local -o results/ --quick
 ```
 
 Target file format (one per line):
@@ -122,7 +94,7 @@ Scan a specific share:
 smbellum -h 192.168.1.100 -s public
 
 # With domain credentials + saving output
-smbellum -h fileserver.corp.local -s SYSVOL -u admin -p secret123 -d corp.local
+smbellum -h fileserver.corp.local -s SYSVOL -u admin -p secret123 -d corp.local -o results/
 ```
 
 ## Options
@@ -149,39 +121,10 @@ smbellum -h fileserver.corp.local -s SYSVOL -u admin -p secret123 -d corp.local
 
 | Flag | Description |
 |------|-------------|
-| `--ldaps` | Use LDAPS (port 636) instead of LDAP (port 389) |
-| `--channel-binding` | Require NTLMv2 with RFC 5929 channel binding on LDAPS; refuse fallback to simple bind (prevents cleartext credential exposure on CBT-enforced DCs) |
+| `--ldaps` | Use LDAPS instead of LDAP |
+| `--channel-binding` | Require NTLMv2 with RFC 5929 channel binding on LDAPS) |
 | `--dns-server`, `-dns` | Custom DNS server IP for hostname resolution |
 | `--discovery-only`, `-do` | Discovery only: output shares in UNC format without scanning |
-
-### LDAP Authentication Behavior
-
-SMBellum auto-negotiates the strongest LDAP auth available per DC:
-
-1. **LDAPS with NTLMv2 + channel binding** — RFC 5929 `tls-server-end-point`
-   CBT is embedded as the NTLMv2 `MsvAvChannelBindings` AV pair, so the bind
-   succeeds against Server 2022/2025 DCs with "LDAP server channel binding
-   token requirements = Always".
-2. **LDAPS + simple bind** — fallback when NTLMv2 fails. Credentials transit
-   as cleartext inside the TLS tunnel; use only when the TLS channel is trusted.
-3. **Plain LDAP + simple bind (port 389)** — last resort for legacy DCs without
-   LDAPS. Credentials are cleartext on the wire.
-
-Use `--channel-binding` to require attempt 1 and refuse fallback — this
-guarantees the operator's password never transits as cleartext, even inside
-TLS, at the cost of failing against non-CBT DCs.
-
-LDAPS certificate validation is disabled by default (matches impacket, NetExec,
-BloodHound.py) because internal CA / self-signed certs are the norm in AD
-environments.
-
-### Note on NTLMSSP implementation
-
-Channel binding required patching `github.com/Azure/go-ntlmssp` (already a
-transitive dep via go-ldap) to inject the `MsvAvChannelBindings` AV pair. The
-patched copy lives in-tree at `third_party/go-ntlmssp/` and is wired via a
-`replace` directive in `go.mod`. Upstream remains MIT-licensed; see
-`third_party/go-ntlmssp/NOTICE.md` for details on modifications.
 
 ### Filtering
 
@@ -236,4 +179,4 @@ Use `--show-default-exclusions` to see the complete list, or `--no-default-exclu
 
 - Discovery mode filters out disabled AD accounts and machines inactive for >4 months, a la [Snaffler](https://github.com/SnaffCon/Snaffler)
 - Only shares with read access are reported during discovery
-- Secret scanning is powered by [Titus](https://github.com/praetorian-inc/titus), a Go port of NoseyParker — no external binary required
+- Secret scanning is powered by [Titus](https://github.com/praetorian-inc/titus), a Go port of NoseyParker
