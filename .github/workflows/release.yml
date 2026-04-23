@@ -1,0 +1,450 @@
+# SMBellum Release Workflow - Creates binaries for all platforms
+#
+# Builds with Hyperscan/Vectorscan for high-performance SIMD-accelerated regex matching.
+# All binaries are statically linked - no runtime dependencies required.
+#
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v0.1.0)'
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  VERSION: ${{ inputs.version || github.ref_name }}
+
+jobs:
+  # Validate version format before any build runs so that a malformed
+  # workflow_dispatch input cannot flow into shell steps that embed it.
+  validate:
+    name: Validate version
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Check version format
+      env:
+        VERSION: ${{ env.VERSION }}
+      run: |
+        if ! printf '%s' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$'; then
+          echo "Invalid version '$VERSION'"
+          echo "Expected format: vMAJOR.MINOR.PATCH[-PRERELEASE] (e.g. v1.2.3, v1.2.3-rc1)"
+          exit 1
+        fi
+        echo "Version '$VERSION' is valid"
+
+  # Build Linux amd64 with Intel hyperscan (static)
+  build-linux-amd64:
+    name: Build Linux amd64
+    needs: validate
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+    - name: Set up Go
+      uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
+      with:
+        go-version-file: 'go.mod'
+        cache: true
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake ragel pkg-config libboost-dev
+
+    - name: Build hyperscan static library
+      run: |
+        # Pinned to commit SHA of intel/hyperscan v5.4.2 (tags are mutable, commits are not)
+        HS_COMMIT=bc3b191ab56055e8560c7cdc161c289c4d76e3d2
+        git clone https://github.com/intel/hyperscan.git /tmp/hyperscan
+        cd /tmp/hyperscan
+        git checkout "$HS_COMMIT"
+        mkdir build && cd build
+        cmake .. \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DBUILD_SHARED_LIBS=OFF \
+          -DCMAKE_INSTALL_PREFIX=/usr/local
+        make -j$(nproc)
+        sudo make install
+        ls -la /usr/local/lib/libhs*.a
+
+    - name: Build binary
+      env:
+        CGO_ENABLED: "1"
+        CGO_CFLAGS: "-I/usr/local/include"
+        CGO_LDFLAGS: "-L/usr/local/lib -lhs -lstdc++ -lm"
+      run: |
+        mkdir -p dist
+        GOWORK=off go build -tags "cgo vectorscan" -ldflags "-s -w -extldflags \"-static\" -X main.version=${VERSION}" -o dist/smbellum-linux-amd64 ./cmd/smbellum
+        chmod +x dist/smbellum-linux-amd64
+        file dist/smbellum-linux-amd64
+        ldd dist/smbellum-linux-amd64 || true
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: smbellum-linux-amd64
+        path: dist/smbellum-linux-amd64
+
+  # Build Linux arm64 with vectorscan (ARM port of hyperscan)
+  build-linux-arm64:
+    name: Build Linux arm64
+    needs: validate
+    runs-on: ubuntu-22.04-arm
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+    - name: Set up Go
+      uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
+      with:
+        go-version-file: 'go.mod'
+        cache: true
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake ragel pkg-config libboost-dev
+
+    - name: Build vectorscan static library
+      run: |
+        # Pinned to commit SHA of VectorCamp/vectorscan vectorscan/5.4.11 (tags are mutable, commits are not)
+        VS_COMMIT=d29730e1cb9daaa66bda63426cdce83505d2c809
+        git clone https://github.com/VectorCamp/vectorscan.git /tmp/vectorscan
+        cd /tmp/vectorscan
+        git checkout "$VS_COMMIT"
+        mkdir build && cd build
+        cmake .. \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DBUILD_SHARED_LIBS=OFF \
+          -DCMAKE_INSTALL_PREFIX=/usr/local
+        make -j$(nproc)
+        sudo make install
+        ls -la /usr/local/lib/libhs*.a
+
+    - name: Build binary
+      env:
+        CGO_ENABLED: "1"
+        CGO_CFLAGS: "-I/usr/local/include"
+        CGO_LDFLAGS: "-L/usr/local/lib -lhs -lstdc++ -lm"
+      run: |
+        mkdir -p dist
+        GOWORK=off go build -tags "cgo vectorscan" -ldflags "-s -w -extldflags \"-static\" -X main.version=${VERSION}" -o dist/smbellum-linux-arm64 ./cmd/smbellum
+        chmod +x dist/smbellum-linux-arm64
+        file dist/smbellum-linux-arm64
+        ldd dist/smbellum-linux-arm64 || true
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: smbellum-linux-arm64
+        path: dist/smbellum-linux-arm64
+
+  # Build macOS binaries (static vectorscan/hyperscan linked in)
+  build-macos:
+    name: Build macOS ${{ matrix.arch }}
+    needs: validate
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-14
+            hs_repo: https://github.com/VectorCamp/vectorscan.git
+            # Commit SHA of VectorCamp/vectorscan tag vectorscan/5.4.11
+            hs_commit: d29730e1cb9daaa66bda63426cdce83505d2c809
+          - arch: amd64
+            runner: macos-15-intel
+            hs_repo: https://github.com/intel/hyperscan.git
+            # Commit SHA of intel/hyperscan tag v5.4.2
+            hs_commit: bc3b191ab56055e8560c7cdc161c289c4d76e3d2
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+    - name: Set up Go
+      uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
+      with:
+        go-version-file: 'go.mod'
+        cache: true
+
+    - name: Install build dependencies
+      run: |
+        brew install cmake ragel pkg-config boost pcre
+
+    - name: Build hyperscan/vectorscan static library
+      env:
+        HS_REPO: ${{ matrix.hs_repo }}
+        HS_COMMIT: ${{ matrix.hs_commit }}
+      run: |
+        git clone "$HS_REPO" /tmp/hs-src
+        cd /tmp/hs-src
+        git checkout "$HS_COMMIT"
+        mkdir build && cd build
+        cmake .. \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DBUILD_SHARED_LIBS=OFF \
+          -DBUILD_TOOLS=OFF \
+          -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+          -DCMAKE_INSTALL_PREFIX=/tmp/hs-install
+        make -j$(sysctl -n hw.ncpu)
+        make install
+        ls -la /tmp/hs-install/lib/libhs*.a
+        find /tmp/hs-install/include -name "hs.h"
+
+    - name: Create pkg-config file
+      run: |
+        # Determine where hs.h was installed
+        if [ -f /tmp/hs-install/include/hs/hs.h ]; then
+          HS_INCLUDE="/tmp/hs-install/include/hs"
+        else
+          HS_INCLUDE="/tmp/hs-install/include"
+        fi
+
+        mkdir -p /tmp/hs-install/lib/pkgconfig
+        cat > /tmp/hs-install/lib/pkgconfig/libhs.pc << PKGEOF
+        prefix=/tmp/hs-install
+        libdir=\${prefix}/lib
+        includedir=${HS_INCLUDE}
+
+        Name: libhs
+        Description: Hyperscan/Vectorscan regex library
+        Version: 5.4
+        Libs: -L\${libdir} -lhs
+        Cflags: -I\${includedir}
+        PKGEOF
+        sed -i '' 's/^        //' /tmp/hs-install/lib/pkgconfig/libhs.pc
+
+        echo "=== libhs.pc ==="
+        cat /tmp/hs-install/lib/pkgconfig/libhs.pc
+        PKG_CONFIG_PATH=/tmp/hs-install/lib/pkgconfig pkg-config --cflags --libs libhs
+
+    - name: Build binary
+      env:
+        CGO_ENABLED: "1"
+        PKG_CONFIG_PATH: "/tmp/hs-install/lib/pkgconfig"
+      run: |
+        export CGO_LDFLAGS="/tmp/hs-install/lib/libhs.a -lc++"
+
+        mkdir -p dist
+        GOWORK=off go build -tags "cgo vectorscan" -ldflags "-s -w -X main.version=${VERSION}" -o dist/smbellum-darwin-${{ matrix.arch }} ./cmd/smbellum
+        chmod +x dist/smbellum-darwin-${{ matrix.arch }}
+        file dist/smbellum-darwin-${{ matrix.arch }}
+        otool -L dist/smbellum-darwin-${{ matrix.arch }}
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: smbellum-darwin-${{ matrix.arch }}
+        path: dist/smbellum-darwin-${{ matrix.arch }}
+
+  # Build Windows binary using MSYS2/MinGW (compatible with Go CGO)
+  build-windows:
+    name: Build Windows amd64
+    needs: validate
+    runs-on: windows-2022
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+    - name: Setup MSYS2
+      uses: msys2/setup-msys2@c52d1fa9c7492275e60fe763540fb601f5f232a1 # v2.25.0
+      with:
+        msystem: MINGW64
+        update: true
+        install: >-
+          mingw-w64-x86_64-toolchain
+          mingw-w64-x86_64-cmake
+          mingw-w64-x86_64-boost
+          mingw-w64-x86_64-pkg-config
+          mingw-w64-x86_64-ragel
+          git
+          make
+
+    - name: Checkout code
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+    - name: Set up Go
+      uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
+      with:
+        go-version-file: 'go.mod'
+        cache: true
+
+    - name: Build vectorscan static library with MinGW
+      run: |
+        # Pinned to commit SHA of VectorCamp/vectorscan vectorscan/5.4.11 (tags are mutable, commits are not)
+        VS_COMMIT=d29730e1cb9daaa66bda63426cdce83505d2c809
+        git clone https://github.com/VectorCamp/vectorscan.git /tmp/vectorscan
+        cd /tmp/vectorscan
+        git checkout "$VS_COMMIT"
+        mkdir build && cd build
+        cmake .. \
+          -G "MinGW Makefiles" \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DBUILD_SHARED_LIBS=OFF \
+          -DCMAKE_C_COMPILER=gcc \
+          -DCMAKE_CXX_COMPILER=g++ \
+          -DCMAKE_INSTALL_PREFIX=/mingw64
+        mingw32-make -j$(nproc)
+        mingw32-make install
+        ls -la /mingw64/lib/libhs*.a
+        ls -la /mingw64/include/hs/ || ls -la /mingw64/include/
+
+    - name: Create pkg-config file for vectorscan
+      run: |
+        # Find where headers are installed
+        echo "=== Checking header locations ==="
+        find /mingw64/include -name "hs.h" 2>/dev/null || echo "hs.h not found in /mingw64/include"
+        ls -la /mingw64/include/hs/ 2>/dev/null || echo "No /mingw64/include/hs/ directory"
+
+        # Determine include path (vectorscan may install to include/hs/ or include/)
+        if [ -f /mingw64/include/hs/hs.h ]; then
+          HS_INCLUDE="/mingw64/include/hs"
+        else
+          HS_INCLUDE="/mingw64/include"
+        fi
+        echo "Using include path: $HS_INCLUDE"
+
+        # Create libhs.pc for pkg-config discovery (no leading whitespace!)
+        printf '%s\n' \
+          "prefix=/mingw64" \
+          "exec_prefix=\${prefix}" \
+          "libdir=\${prefix}/lib" \
+          "includedir=$HS_INCLUDE" \
+          "" \
+          "Name: libhs" \
+          "Description: Vectorscan regex library (Hyperscan fork)" \
+          "Version: 5.4.11" \
+          "Libs: -L\${libdir} -lhs" \
+          "Cflags: -I\${includedir}" \
+          > /mingw64/lib/pkgconfig/libhs.pc
+
+        echo "=== libhs.pc contents ==="
+        cat /mingw64/lib/pkgconfig/libhs.pc
+
+        echo "=== pkg-config test ==="
+        pkg-config --cflags libhs
+        pkg-config --libs libhs
+
+    - name: Build binary
+      env:
+        CGO_ENABLED: "1"
+        PKG_CONFIG_PATH: "/mingw64/lib/pkgconfig"
+      run: |
+        # Get Go binary from actions/setup-go (Windows native path)
+        export PATH="$(cygpath -u "$GOROOT_1_25_X64/bin"):$PATH"
+        export GOWORK=off
+
+        # Verify pkg-config can find libhs
+        echo "=== Final pkg-config verification ==="
+        pkg-config --cflags --libs libhs
+
+        mkdir -p dist
+        go build -tags "cgo vectorscan" -ldflags "-s -w -extldflags \"-static\" -X main.version=${VERSION}" -o dist/smbellum-windows-amd64.exe ./cmd/smbellum
+        ls -la dist/
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: smbellum-windows-amd64
+        path: dist/smbellum-windows-amd64.exe
+
+  # Create GitHub release with all artifacts
+  release:
+    name: Create Release
+    needs: [build-linux-amd64, build-linux-arm64, build-macos, build-windows]
+    runs-on: ubuntu-22.04
+    environment: release
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+    - name: Download all artifacts
+      uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+      with:
+        path: artifacts
+
+    - name: Prepare release assets
+      run: |
+        mkdir -p release
+
+        # Move binaries
+        mv artifacts/smbellum-linux-amd64/smbellum-linux-amd64 release/
+        mv artifacts/smbellum-linux-arm64/smbellum-linux-arm64 release/ || true
+        mv artifacts/smbellum-darwin-arm64/smbellum-darwin-arm64 release/
+        mv artifacts/smbellum-darwin-amd64/smbellum-darwin-amd64 release/
+        mv artifacts/smbellum-windows-amd64/smbellum-windows-amd64.exe release/
+
+        # Create checksums
+        cd release
+        sha256sum * > checksums.txt
+
+        ls -la
+
+    - name: Generate release notes
+      run: |
+        cat > release_notes.md << 'NOTES_EOF'
+        ## SMBellum
+
+        All binaries include high-performance Hyperscan/Vectorscan regex matching
+        for secret detection. No runtime dependencies required.
+
+        ### Downloads
+
+        | Platform | Architecture | File |
+        |----------|-------------|------|
+        | Linux | x64 | `smbellum-linux-amd64` |
+        | Linux | arm64 | `smbellum-linux-arm64` |
+        | macOS | Apple Silicon | `smbellum-darwin-arm64` |
+        | macOS | Intel | `smbellum-darwin-amd64` |
+        | Windows | x64 | `smbellum-windows-amd64.exe` |
+
+        ### Installation
+
+        Download the appropriate binary for your platform from the assets below.
+
+        **Linux/macOS:**
+        ```bash
+        chmod +x smbellum-*
+        sudo mv smbellum-* /usr/local/bin/smbellum
+        ```
+
+        **Windows:** Run the .exe directly or add to PATH.
+
+        ### Checksums
+
+        See `checksums.txt` for SHA256 checksums of all files.
+        NOTES_EOF
+        sed 's/^        //' release_notes.md > release_notes_clean.md && mv release_notes_clean.md release_notes.md
+
+    - name: Create Release
+      uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2.2.1
+      with:
+        tag_name: ${{ env.VERSION }}
+        body_path: release_notes.md
+        files: release/*
+        draft: false
+        prerelease: ${{ contains(env.VERSION, '-alpha') || contains(env.VERSION, '-beta') || contains(env.VERSION, '-rc') }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
