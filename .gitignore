@@ -1,0 +1,7 @@
+# Binaries
+SMBellum-*
+dist/
+
+# IDE/Editor
+.claude/
+.vscode/
