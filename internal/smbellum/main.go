@@ -683,7 +683,7 @@ func parseArgs(version string) Config {
 	}
 
 	if config.ChannelBinding {
-		logln("Notice: --channel-binding semantics changed. It now REQUIRES NTLMv2+CBT and refuses simple-bind fallback. See CHANGELOG.md. Drop the flag to restore the previous auto-negotiation behavior (now the default).")
+		logln("Notice: --channel-binding semantics changed. It now REQUIRES NTLMv2+CBT and refuses simple-bind fallback. Drop the flag to restore the previous auto-negotiation behavior (now the default).")
 	}
 
 	// Quick mode: apply defaults for depth and share time unless explicitly overridden
