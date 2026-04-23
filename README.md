@@ -125,6 +125,7 @@ smbellum -h fileserver.corp.local -s SYSVOL -u admin -p secret123 -d corp.local 
 | `--channel-binding` | Require NTLMv2 with RFC 5929 channel binding on LDAPS) |
 | `--dns-server`, `-dns` | Custom DNS server IP for hostname resolution |
 | `--discovery-only`, `-do` | Discovery only: output shares in UNC format without scanning |
+| `--no-dfs` | Disable DFS namespace awareness (skip DFS deduplication) |
 
 ### Filtering
 
@@ -145,7 +146,29 @@ Custom exclusions are always additive to the defaults. Use `--no-default-exclusi
 |------|-------------|
 | `--output [path]`, `-o [path]` | Save report output. Single target: filename (default: `{host}__{share}.txt`). Batch mode: directory |
 | `--output-format`, `-of` | Output formats to save (comma-separated: `txt`, `json`, `jsonl`, `sarif`, `tabularium`). Default: `txt` |
-| `--verbose`, `-v` | Verbose output (show excluded files, unreachable hosts) |
+| `--zip`, `-z` | Zip txt/json output files into a single archive and delete originals (requires `-o`) |
+| `--verbose`, `-v` | Show per-share progress (connections, scan lifecycle) |
+| `--debug`, `-de` | Show per-file diagnostics (skipped files, errors, chunking) |
+| `--timestamp`, `-ts` | Prepend a timestamp to every log line |
+| `--version` | Print version and exit |
+
+### Scanning
+
+| Flag | Description |
+|------|-------------|
+| `--extract`, `-x` | Extract and scan text from binary files (docx, xlsx, pptx, pdf, archives, etc.) |
+| `--quick`, `-q` | Quick mode: high-value file types only, depth 5, 15 min/share |
+| `--max-scan-size`, `-ms` | Max file size to scan in MB (default: 5, 0 = no limit) |
+| `--max-depth`, `-md` | Max directory recursion depth (default: 0 = unlimited) |
+| `--max-share-time`, `-mst` | Max time per share in minutes (default: 45, 0 = indefinite) |
+| `--max-files-per-dir`, `-mf` | Max files to scan per directory (default: 0 = unlimited) |
+
+### Concurrency
+
+| Flag | Description |
+|------|-------------|
+| `--share-workers`, `-jt` | Parallel share workers (default: 60) |
+| `--file-workers`, `-jf` | Parallel file scanners per share (default: NumCPU) |
 
 ## Default Exclusions
 
