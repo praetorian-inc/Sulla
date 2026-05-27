@@ -56,7 +56,7 @@ func sidToString(sidBytes []byte) string {
 }
 
 // discoverTargets orchestrates host and share discovery with parallel workers
-// If fetchSIDs is true, also fetches SIDs for tabularium output
+// If fetchSIDs is true, also fetches SIDs for capability-sdk output
 func discoverTargets(config Config, fetchSIDs bool) ([]Target, *DiscoveryResult, error) {
 	// Step 1: Get list of domain controllers to try
 	var domainControllers []string
@@ -330,7 +330,7 @@ func connectToLDAP(dc string, config Config) (*ldap.Conn, string, error) {
 
 // discoverComputers queries AD via LDAP for all computer objects
 // It tries each domain controller in the list until one succeeds
-// Returns computer hostnames and optionally DiscoveryResult with SIDs for tabularium output
+// Returns computer hostnames and optionally DiscoveryResult with SIDs for capability-sdk output
 func discoverComputers(config Config, domainControllers []string, fetchSIDs bool) ([]string, *DiscoveryResult, error) {
 	var l *ldap.Conn
 	var err error

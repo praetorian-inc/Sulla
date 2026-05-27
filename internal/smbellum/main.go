@@ -214,7 +214,7 @@ func Main(version string) {
 			logf("Error during discovery: %v\n", err)
 			os.Exit(1)
 		}
-		// Store discovery result for tabularium output
+		// Store discovery result for capability-sdk output
 		config.DiscoveryResult = discoveryResult
 
 		if len(targets) == 0 {

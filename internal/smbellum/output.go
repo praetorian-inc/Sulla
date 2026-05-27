@@ -2,7 +2,6 @@ package smbellum
 
 import (
 	"archive/zip"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -197,172 +196,10 @@ func redactProofContent(content string) string {
 	return strings.Join(result, "\n")
 }
 
-// generateTabulariumOutput creates a tabularium-compatible JSON file for Guard platform ingestion
-func generateTabulariumOutput(config Config, results []ScanResult) error {
-	discovery := config.DiscoveryResult
-	if discovery == nil {
-		return fmt.Errorf("no discovery result available")
-	}
-
-	now := time.Now().UTC().Format(time.RFC3339)
-	domainLower := strings.ToLower(config.Domain)
-
-	// Build domain object for context and items
-	domainObj := map[string]interface{}{
-		"_type":             "addomain",
-		"key":               fmt.Sprintf("#addomain#%s#%s", domainLower, discovery.Domain.SID),
-		"label":             "ADDomain",
-		"class":             "domain",
-		"domain":            domainLower,
-		"objectid":          discovery.Domain.SID,
-		"sid":               discovery.Domain.SID,
-		"domainsid":         discovery.Domain.SID,
-		"distinguishedname": discovery.Domain.DistinguishedName,
-	}
-
-	// Build context
-	output := TabulariumOutput{
-		Context: TabulariumContext{
-			Source: "smbellum",
-			Target: domainObj,
-		},
-		Items: []interface{}{},
-	}
-
-	// Add domain object to items
-	output.Items = append(output.Items, domainObj)
-
-	// Aggregate findings per host
-	// Map from hostname to list of results with findings
-	hostFindings := make(map[string][]ScanResult)
-	for _, r := range results {
-		if r.HasFindings {
-			hostFindings[r.Host] = append(hostFindings[r.Host], r)
-		}
-	}
-
-	// For each host with findings, create computer object, risk, and proof file
-	for host, hostResults := range hostFindings {
-		// Get computer info from discovery result
-		computerInfo, ok := discovery.Computers[host]
-		if !ok {
-			// Computer not found in discovery (shouldn't happen), skip
-			logf("[!] Warning: Computer %s not found in discovery result, skipping tabularium entry\n", host)
-			continue
-		}
-
-		// Create computer object
-		computerObj := TabulariumADComputer{
-			Type:              "adcomputer",
-			Key:               fmt.Sprintf("#adcomputer#%s#%s", domainLower, computerInfo.SID),
-			Label:             "ADComputer",
-			Class:             "computer",
-			Domain:            domainLower,
-			ObjectID:          computerInfo.SID,
-			SID:               computerInfo.SID,
-			DistinguishedName: computerInfo.DistinguishedName,
-			DNSHostName:       strings.ToLower(computerInfo.DNSHostName),
-		}
-		output.Items = append(output.Items, computerObj)
-
-		// Aggregate proof content from all output files for this host
-		var proofContent strings.Builder
-		proofContent.WriteString(fmt.Sprintf("Host: %s\n", host))
-		proofContent.WriteString(fmt.Sprintf("Shares with findings: %d\n", len(hostResults)))
-		proofContent.WriteString("=" + strings.Repeat("=", 50) + "\n\n")
-
-		for _, r := range hostResults {
-			proofContent.WriteString(fmt.Sprintf("Share: %s\n", r.Share))
-			proofContent.WriteString("-" + strings.Repeat("-", 30) + "\n")
-
-			// Read the output file if it exists, redacting secret values
-			if r.OutputPath != "" {
-				content, err := os.ReadFile(r.OutputPath)
-				if err == nil {
-					proofContent.WriteString(redactProofContent(string(content)))
-				} else {
-					proofContent.WriteString(fmt.Sprintf("[Could not read output file: %v]\n", err))
-				}
-			} else {
-				proofContent.WriteString("[No output file saved]\n")
-			}
-			proofContent.WriteString("\n")
-		}
-
-		// Create risk object - use host (not domain) for unique risk per host
-		hostLower := strings.ToLower(host)
-		riskKey := fmt.Sprintf("#risk#%s#smb-exposed-secrets", hostLower)
-		riskTarget := map[string]interface{}{
-			"_type":       "adcomputer",
-			"key":         computerObj.Key,
-			"label":       "ADComputer",
-			"class":       "computer",
-			"domain":      domainLower,
-			"objectid":    computerInfo.SID,
-			"dnshostname": strings.ToLower(computerInfo.DNSHostName),
-		}
-
-		risk := TabulariumRisk{
-			Type:     "risk",
-			Key:      riskKey,
-			DNS:      hostLower,
-			Name:     "smb-exposed-secrets",
-			Status:   "TM", // Triage Medium
-			Source:   "smbellum:TITUS",
-			Priority: 20, // Medium
-			Created:  now,
-			Updated:  now,
-			Visited:  now,
-			Target:   riskTarget,
-		}
-		output.Items = append(output.Items, risk)
-
-		// Create proof file - name must match risk dns/name for evidence linkage
-		proofName := fmt.Sprintf("proofs/%s/smb-exposed-secrets", hostLower)
-		proofFile := TabulariumFile{
-			Type:  "file",
-			Key:   fmt.Sprintf("#file#%s", proofName),
-			Name:  proofName,
-			Bytes: "base64:" + base64.StdEncoding.EncodeToString([]byte(proofContent.String())),
-		}
-		output.Items = append(output.Items, proofFile)
-	}
-
-	// Serialize to JSON
-	jsonData, err := json.MarshalIndent(output, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to serialize tabularium output: %w", err)
-	}
-
-	// Determine output path
-	filename := fmt.Sprintf("%s.tabularium", sanitizeFilename(config.Domain))
-	outputPath := filename
-	if config.OutputFile != "" {
-		// Check if OutputFile is a directory
-		if info, err := os.Stat(config.OutputFile); err == nil && info.IsDir() {
-			outputPath = filepath.Join(config.OutputFile, filename)
-		} else if strings.HasSuffix(config.OutputFile, "/") || strings.HasSuffix(config.OutputFile, string(os.PathSeparator)) {
-			// Intended to be a directory
-			if err := os.MkdirAll(config.OutputFile, 0755); err != nil {
-				return fmt.Errorf("failed to create output directory: %w", err)
-			}
-			outputPath = filepath.Join(config.OutputFile, filename)
-		}
-	}
-
-	// Write the file
-	if err := os.WriteFile(outputPath, jsonData, 0644); err != nil {
-		return fmt.Errorf("failed to write tabularium output: %w", err)
-	}
-
-	logf("[+] Tabularium output written to %s\n", outputPath)
-	return nil
-}
-
 // zipOutputFiles collects the tracked txt/json output files into a single zip
-// archive, then removes the originals. The zip is named to match the tabularium
-// convention: {sanitized_domain_or_host__share}.zip and placed in the same
-// directory as the output files.
+// archive, then removes the originals. The zip is named to match the
+// capability-sdk output convention: {sanitized_domain_or_host__share}.zip and
+// placed in the same directory as the output files.
 func zipOutputFiles(config Config) error {
 	// Filter tracked files to output formats we want in the archive
 	zipExts := map[string]bool{".txt": true, ".json": true, ".jsonl": true, ".sarif": true, ".csv": true}
@@ -376,7 +213,7 @@ func zipOutputFiles(config Config) error {
 		return nil
 	}
 
-	// Determine zip filename using tabularium naming convention
+	// Determine zip filename using capability-sdk output naming convention
 	var zipBase string
 	if config.Domain != "" {
 		zipBase = sanitizeFilename(config.Domain)
@@ -384,7 +221,7 @@ func zipOutputFiles(config Config) error {
 		zipBase = sanitizeFilename(config.Host) + "__" + sanitizeFilename(config.Share)
 	}
 
-	// Determine output directory (same as where tabularium would be placed)
+	// Determine output directory (same as where capability-sdk output would be placed)
 	zipDir := "."
 	if config.OutputFile != "" {
 		if info, err := os.Stat(config.OutputFile); err == nil && info.IsDir() {
@@ -491,22 +328,22 @@ func outputDiscoveredShares(config Config, targets []Target) {
 }
 
 // resolveOutputFormats returns the list of formats to write to disk. It strips
-// "capability-sdk" and "tabularium" (handled by their own emitters) and falls
-// back to ["txt"] when nothing is requested.
+// "capability-sdk" (handled by generateCapabilitySDKOutput) and falls back to
+// ["txt"] when nothing is requested.
 //
-// When a structured format is requested alongside a non-txt format
-// (e.g. -of sarif,capability-sdk), the .txt file must still be written: the
-// structured proof blob is built by reading ScanResult.OutputPath (a .txt
+// When capability-sdk is requested alongside a non-txt format (e.g.
+// -of sarif,capability-sdk), the .txt file must still be written: the
+// capability-sdk proof blob is built by reading ScanResult.OutputPath (a .txt
 // path) and passing it through redactProofContent, which depends on the text
 // format's "  Match:" prefix markers. Without this, the proof content
 // degrades to "[Could not read output file: ...]".
 func resolveOutputFormats(requested []string) []string {
 	var out []string
-	hasStructured := false
+	hasCapabilitySDK := false
 	hasTxt := false
 	for _, f := range requested {
-		if f == "tabularium" || f == "capability-sdk" {
-			hasStructured = true
+		if f == "capability-sdk" {
+			hasCapabilitySDK = true
 			continue
 		}
 		if f == "txt" {
@@ -514,7 +351,7 @@ func resolveOutputFormats(requested []string) []string {
 		}
 		out = append(out, f)
 	}
-	if hasStructured && !hasTxt {
+	if hasCapabilitySDK && !hasTxt {
 		out = append([]string{"txt"}, out...)
 	}
 	if len(out) == 0 {

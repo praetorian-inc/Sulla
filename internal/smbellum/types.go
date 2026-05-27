@@ -38,7 +38,7 @@ type Config struct {
 	ExcludedShares    []string
 	SaveOutput        bool
 	OutputFile        string
-	OutputFormats     []string // Output formats: txt, json, jsonl, sarif, tabularium
+	OutputFormats     []string // Output formats: txt, json, jsonl, sarif, capability-sdk
 	Verbose           bool
 	Debug             bool // --debug: show per-file diagnostics (skipped files, errors, chunking)
 	TargetsFile       string
@@ -47,7 +47,7 @@ type Config struct {
 	ChannelBinding    bool             // Require NTLMv2+CBT on LDAPS; disables simple-bind fallback
 	DNSServer         string           // Custom DNS server IP for lookups
 	DiscoveryOnly     bool             // Discovery-only mode: output shares without scanning
-	DiscoveryResult   *DiscoveryResult // AD discovery metadata for tabularium output
+	DiscoveryResult   *DiscoveryResult // AD discovery metadata for capability-sdk output
 	ShareWorkers      int              // Number of parallel share workers (default 60)
 	FileWorkers       int              // Number of parallel file scanning goroutines per share (default NumCPU)
 	NoDFS             bool             // Disable DFS namespace awareness
@@ -77,80 +77,24 @@ type Target struct {
 	DFSPath string // Canonical DFS namespace path (e.g., \\corp.local\dfs\link), empty if not a DFS target
 }
 
-// ComputerInfo holds AD computer metadata for tabularium output
+// ComputerInfo holds AD computer metadata for capability-sdk output
 type ComputerInfo struct {
 	DNSHostName       string
 	SID               string
 	DistinguishedName string
 }
 
-// DomainInfo holds AD domain metadata for tabularium output
+// DomainInfo holds AD domain metadata for capability-sdk output
 type DomainInfo struct {
 	Name              string
 	SID               string
 	DistinguishedName string
 }
 
-// DiscoveryResult holds the results of AD discovery for tabularium output
+// DiscoveryResult holds the results of AD discovery for capability-sdk output
 type DiscoveryResult struct {
 	Domain    DomainInfo
 	Computers map[string]ComputerInfo // keyed by DNSHostName
-}
-
-// Tabularium output structures
-type TabulariumOutput struct {
-	Context TabulariumContext `json:"context"`
-	Items   []interface{}     `json:"items"`
-}
-
-type TabulariumContext struct {
-	Source string                 `json:"source"`
-	Target map[string]interface{} `json:"target"`
-}
-
-type TabulariumADDomain struct {
-	Type              string `json:"_type"`
-	Key               string `json:"key"`
-	Label             string `json:"label"`
-	Class             string `json:"class"`
-	Domain            string `json:"domain"`
-	ObjectID          string `json:"objectid"`
-	SID               string `json:"sid"`
-	DomainSID         string `json:"domainsid"`
-	DistinguishedName string `json:"distinguishedname"`
-}
-
-type TabulariumADComputer struct {
-	Type              string `json:"_type"`
-	Key               string `json:"key"`
-	Label             string `json:"label"`
-	Class             string `json:"class"`
-	Domain            string `json:"domain"`
-	ObjectID          string `json:"objectid"`
-	SID               string `json:"sid"`
-	DistinguishedName string `json:"distinguishedname"`
-	DNSHostName       string `json:"dnshostname"`
-}
-
-type TabulariumRisk struct {
-	Type     string                 `json:"_type"`
-	Key      string                 `json:"key"`
-	DNS      string                 `json:"dns"`
-	Name     string                 `json:"name"`
-	Status   string                 `json:"status"`
-	Source   string                 `json:"source"`
-	Priority int                    `json:"priority"`
-	Created  string                 `json:"created"`
-	Updated  string                 `json:"updated"`
-	Visited  string                 `json:"visited"`
-	Target   map[string]interface{} `json:"_target"`
-}
-
-type TabulariumFile struct {
-	Type  string `json:"_type"`
-	Key   string `json:"key"`
-	Name  string `json:"name"`
-	Bytes string `json:"bytes"`
 }
 
 // ScanResult holds the outcome of scanning a single target
@@ -159,7 +103,7 @@ type ScanResult struct {
 	Share       string
 	Error       error
 	HasFindings bool   // Whether Titus found any secrets
-	OutputPath  string // Path to the output file (for tabularium aggregation)
+	OutputPath  string // Path to the output file (for capability-sdk proof aggregation)
 	// Expanded summary fields
 	TimedOut       bool
 	FileCount      int64

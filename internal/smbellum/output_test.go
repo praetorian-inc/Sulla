@@ -157,37 +157,37 @@ func TestResolveOutputFormats(t *testing.T) {
 			want:      []string{"sarif"},
 		},
 		{
-			name:      "tabularium alone expands to txt",
-			requested: []string{"tabularium"},
+			name:      "capability-sdk alone expands to txt",
+			requested: []string{"capability-sdk"},
 			want:      []string{"txt"},
 		},
-		// Regression: tabularium proof blob is built from the .txt file.
-		// If tabularium is paired with a non-txt format, txt must still be
-		// written so the aggregator in generateTabulariumOutput has content
+		// Regression: capability-sdk proof blob is built from the .txt file.
+		// If capability-sdk is paired with a non-txt format, txt must still be
+		// written so the aggregator in generateCapabilitySDKOutput has content
 		// to redact and embed.
 		{
-			name:      "sarif+tabularium forces txt",
-			requested: []string{"sarif", "tabularium"},
+			name:      "sarif+capability-sdk forces txt",
+			requested: []string{"sarif", "capability-sdk"},
 			want:      []string{"txt", "sarif"},
 		},
 		{
-			name:      "jsonl+tabularium forces txt",
-			requested: []string{"jsonl", "tabularium"},
+			name:      "jsonl+capability-sdk forces txt",
+			requested: []string{"jsonl", "capability-sdk"},
 			want:      []string{"txt", "jsonl"},
 		},
 		{
-			name:      "txt+sarif+tabularium keeps order, no duplicate txt",
-			requested: []string{"txt", "sarif", "tabularium"},
+			name:      "txt+sarif+capability-sdk keeps order, no duplicate txt",
+			requested: []string{"txt", "sarif", "capability-sdk"},
 			want:      []string{"txt", "sarif"},
 		},
 		{
-			name:      "json+tabularium forces txt prepend",
-			requested: []string{"json", "tabularium"},
+			name:      "json+capability-sdk forces txt prepend",
+			requested: []string{"json", "capability-sdk"},
 			want:      []string{"txt", "json"},
 		},
 		{
-			name:      "tabularium strips out without duplicating when txt present",
-			requested: []string{"tabularium", "txt"},
+			name:      "capability-sdk strips out without duplicating when txt present",
+			requested: []string{"capability-sdk", "txt"},
 			want:      []string{"txt"},
 		},
 	}
