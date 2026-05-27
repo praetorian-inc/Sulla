@@ -46,7 +46,7 @@ func TestGenerateCapSDKOutput_Shape(t *testing.T) {
 		t.Fatalf("generateCapabilitySDKOutput: %v", err)
 	}
 
-	out := filepath.Join(tmp, "corp.local.tabularium")
+	out := filepath.Join(tmp, "corp_local.tabularium")
 	data, err := os.ReadFile(out)
 	if err != nil {
 		t.Fatalf("read output: %v", err)
