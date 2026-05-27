@@ -17,7 +17,9 @@ import (
 )
 
 // validateOutputFormats parses a comma-separated --output-format value and
-// returns the list of canonical formats. Empty input yields an empty list.
+// returns the list of canonical formats. The legacy "tabularium" value is
+// rewritten to "capability-sdk" with a stderr deprecation warning; the alias
+// will be removed in the next release. Empty input yields an empty list.
 func validateOutputFormats(input string) ([]string, error) {
 	valid := map[string]bool{
 		"txt":            true,
@@ -35,6 +37,10 @@ func validateOutputFormats(input string) ([]string, error) {
 		format = strings.TrimSpace(strings.ToLower(format))
 		if !valid[format] {
 			return nil, fmt.Errorf("invalid output format %q. Valid formats: txt, json, jsonl, sarif, capability-sdk", format)
+		}
+		if format == "tabularium" {
+			logln("[!] --output-format tabularium is deprecated; use capability-sdk instead. Continuing as capability-sdk.")
+			format = "capability-sdk"
 		}
 		out = append(out, format)
 	}

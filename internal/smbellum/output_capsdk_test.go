@@ -130,6 +130,30 @@ func TestGenerateCapSDKOutput_Shape(t *testing.T) {
 	}
 }
 
+// TestValidateOutputFormat_TabulariumIsDeprecatedAlias verifies the legacy
+// "tabularium" value is rewritten to "capability-sdk" so old scripts keep
+// working for one release.
+func TestValidateOutputFormat_TabulariumIsDeprecatedAlias(t *testing.T) {
+	got, err := validateOutputFormats("tabularium")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, f := range got {
+		if f == "tabularium" {
+			t.Error("validateOutputFormats returned 'tabularium' but it should be rewritten to 'capability-sdk'")
+		}
+	}
+	found := false
+	for _, f := range got {
+		if f == "capability-sdk" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected 'tabularium' to be rewritten to 'capability-sdk'")
+	}
+}
+
 // TestValidateOutputFormat_AcceptsCapabilitySDK verifies the CLI accepts
 // the new format name. The legacy "tabularium" alias is covered in a
 // separate test in Task 5.

@@ -161,28 +161,25 @@ func Main(version string) {
 		logln("[!] Warning: --output-format/-of is ignored in discovery-only mode (-do)")
 	}
 
-	// Validate capability-sdk/tabularium formats only work in discovery mode.
-	hasTabularium := false
+	// capability-sdk output requires discovery mode (needs SIDs and computer
+	// metadata). validateOutputFormats already rewrote any legacy
+	// "tabularium" value to "capability-sdk".
 	hasCapabilitySDK := false
 	for _, f := range config.OutputFormats {
-		if f == "tabularium" {
-			hasTabularium = true
-		}
 		if f == "capability-sdk" {
 			hasCapabilitySDK = true
+			break
 		}
 	}
-	hasStructuredOutput := hasTabularium || hasCapabilitySDK
-	if hasStructuredOutput && !hasDiscovery {
+	if hasCapabilitySDK && !hasDiscovery {
 		logln("Error: --output-format capability-sdk requires discovery mode (provide -d <domain> with credentials).")
 		flag.Usage()
 		os.Exit(1)
 	}
-	// Strip structured-output formats if -do is used (discovery-only mode).
-	if config.DiscoveryOnly && hasStructuredOutput {
+	if config.DiscoveryOnly && hasCapabilitySDK {
 		var filtered []string
 		for _, f := range config.OutputFormats {
-			if f != "tabularium" && f != "capability-sdk" {
+			if f != "capability-sdk" {
 				filtered = append(filtered, f)
 			}
 		}
@@ -209,8 +206,8 @@ func Main(version string) {
 	var targets []Target
 	if hasDiscovery {
 		var err error
-		// Fetch SIDs if structured output (capability-sdk/tabularium) is requested.
-		fetchSIDs := hasStructuredOutput && !config.DiscoveryOnly
+		// Fetch SIDs if capability-sdk output is requested.
+		fetchSIDs := hasCapabilitySDK && !config.DiscoveryOnly
 		var discoveryResult *DiscoveryResult
 		targets, discoveryResult, err = discoverTargets(config, fetchSIDs)
 		if err != nil {
@@ -359,15 +356,9 @@ func Main(version string) {
 		printSummary(results, totalScanTime)
 	}
 
-	// Generate structured (capability-sdk / tabularium) output if requested.
 	if hasCapabilitySDK && config.DiscoveryResult != nil {
 		if err := generateCapabilitySDKOutput(config, results); err != nil {
 			logf("[-] Failed to generate capability-sdk output: %v\n", err)
-		}
-	}
-	if hasTabularium && config.DiscoveryResult != nil {
-		if err := generateTabulariumOutput(config, results); err != nil {
-			logf("[-] Failed to generate tabularium output: %v\n", err)
 		}
 	}
 
