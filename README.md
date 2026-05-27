@@ -51,8 +51,8 @@ docker run --rm --privileged --network=host \
 Automatically discover and scan all accessible SMB shares across an Active Directory domain:
 
 ```bash
-# Auto-discover all accessible shares in quick mode and write to txt/json
-smbellum -u admin -p secret123 -d corp.local -o results/ -of txt,json --quick
+# Auto-discover all accessible shares (quick mode is the default) and write to txt/json
+smbellum -u admin -p secret123 -d corp.local -o results/ -of txt,json
 ```
 
 > SMBellum discovers domain controllers via DNS SRV records (`_ldap._tcp.dc._msdcs.<domain>`). If the first DC is unreachable, it automatically tries others.
@@ -76,7 +76,7 @@ Scan a predefined list of shares:
 
 ```bash
 # Scan targets from file
-smbellum -tf corp_local_discovered_smb_shares.txt -u admin -p secret123 -d corp.local -o results/ --quick
+smbellum -tf corp_local_discovered_smb_shares.txt -u admin -p secret123 -d corp.local -o results/
 ```
 
 Target file format (one per line):
@@ -154,14 +154,16 @@ Custom exclusions are always additive to the defaults. Use `--no-default-exclusi
 
 ### Scanning
 
+> **Quick mode is on by default.** SMBellum only scans high-value file types (allowlisted extensions and filenames), with depth 5, 15 min/share, and 200 files/dir. Pass `--full` to disable the allowlist and tighter limits.
+
 | Flag | Description |
 |------|-------------|
 | `--extract`, `-x` | Extract and scan text from binary files (docx, xlsx, pptx, pdf, archives, etc.) |
-| `--quick`, `-q` | Quick mode: high-value file types only, depth 5, 15 min/share |
+| `--full`, `-f` | Full scan: disable the default quick-mode allowlist and tighter limits |
 | `--max-scan-size`, `-ms` | Max file size to scan in MB (default: 5, 0 = no limit) |
-| `--max-depth`, `-md` | Max directory recursion depth (default: 0 = unlimited) |
-| `--max-share-time`, `-mst` | Max time per share in minutes (default: 45, 0 = indefinite) |
-| `--max-files-per-dir`, `-mf` | Max files to scan per directory (default: 0 = unlimited) |
+| `--max-depth`, `-md` | Max directory recursion depth (default: 5 in quick mode, 0 = unlimited with `--full`) |
+| `--max-share-time`, `-mst` | Max time per share in minutes (default: 15 in quick mode, 45 with `--full`; 0 = indefinite) |
+| `--max-files-per-dir`, `-mf` | Max files to scan per directory (default: 200 in quick mode, 0 = unlimited with `--full`) |
 
 ### Concurrency
 

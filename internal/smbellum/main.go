@@ -590,8 +590,9 @@ func parseArgs(version string) Config {
 	flag.IntVar(&config.MaxShareTime, "mst", 45, "Maximum time per share in minutes (shorthand)")
 	flag.IntVar(&config.MaxFilesPerDir, "max-files-per-dir", 0, "Maximum files to scan per directory (0 = unlimited)")
 	flag.IntVar(&config.MaxFilesPerDir, "mf", 0, "Maximum files to scan per directory (shorthand)")
-	flag.BoolVar(&config.QuickMode, "quick", false, "Quick mode: only scan high-value file types")
-	flag.BoolVar(&config.QuickMode, "q", false, "Quick mode (shorthand)")
+	var fullScan bool
+	flag.BoolVar(&fullScan, "full", false, "Full scan: disable quick-mode allowlist and tighter limits (scan all file types, unlimited depth/time/files-per-dir by default)")
+	flag.BoolVar(&fullScan, "f", false, "Full scan (shorthand)")
 	flag.BoolVar(&config.ZipOutput, "zip", false, "Zip txt/json output files into a single archive and delete originals")
 	flag.BoolVar(&config.ZipOutput, "z", false, "Zip txt/json output files (shorthand)")
 	flag.BoolVar(&config.ExtractBinary, "extract", false, "Extract and scan text from binary files (docx, xlsx, pptx, pdf, archives, etc.)")
@@ -640,7 +641,7 @@ func parseArgs(version string) Config {
 		logln("  -de, --debug        Show per-file diagnostics (skipped files, errors, chunking)")
 		logln("\nScanning:")
 		logln("  --extract, -x            Extract and scan text from binary files (docx, xlsx, pdf, etc.)")
-		logln("  --quick, -q              Quick mode: high-value files only, depth 5, 15 min/share")
+		logln("  --full, -f               Full scan: disable quick-mode (default is quick: high-value files only, depth 5, 15 min/share, 200 files/dir)")
 		logln("  --max-scan-size, -ms     Max file size to scan in MB (default: 5, 0 = no limit)")
 		logln("  --max-depth, -md         Max directory recursion depth (default: 0 = unlimited)")
 		logln("  --max-share-time, -mst   Max time per share in minutes (default: 45, 0 = indefinite)")
@@ -685,6 +686,9 @@ func parseArgs(version string) Config {
 	if config.ChannelBinding {
 		logln("Notice: --channel-binding semantics changed. It now REQUIRES NTLMv2+CBT and refuses simple-bind fallback. Drop the flag to restore the previous auto-negotiation behavior (now the default).")
 	}
+
+	// Quick mode is the default; --full disables it.
+	config.QuickMode = !fullScan
 
 	// Quick mode: apply defaults for depth and share time unless explicitly overridden
 	if config.QuickMode {
