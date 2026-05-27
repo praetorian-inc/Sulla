@@ -129,3 +129,23 @@ func TestGenerateCapSDKOutput_Shape(t *testing.T) {
 		t.Error("emitter must not produce lowercase tabularium _type strings")
 	}
 }
+
+// TestValidateOutputFormat_AcceptsCapabilitySDK verifies the CLI accepts
+// the new format name. The legacy "tabularium" alias is covered in a
+// separate test in Task 5.
+func TestValidateOutputFormat_AcceptsCapabilitySDK(t *testing.T) {
+	got, err := validateOutputFormats("capability-sdk")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	found := false
+	for _, f := range got {
+		if f == "capability-sdk" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("validateOutputFormats(%q) did not include capability-sdk: %v", "capability-sdk", got)
+	}
+}

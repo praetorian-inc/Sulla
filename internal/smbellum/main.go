@@ -161,24 +161,28 @@ func Main(version string) {
 		logln("[!] Warning: --output-format/-of is ignored in discovery-only mode (-do)")
 	}
 
-	// Validate tabularium format only works in discovery mode
+	// Validate capability-sdk/tabularium formats only work in discovery mode.
 	hasTabularium := false
+	hasCapabilitySDK := false
 	for _, f := range config.OutputFormats {
 		if f == "tabularium" {
 			hasTabularium = true
-			break
+		}
+		if f == "capability-sdk" {
+			hasCapabilitySDK = true
 		}
 	}
-	if hasTabularium && !hasDiscovery {
-		logln("Error: --output-format tabularium requires discovery mode (provide -d <domain> with credentials).")
+	hasStructuredOutput := hasTabularium || hasCapabilitySDK
+	if hasStructuredOutput && !hasDiscovery {
+		logln("Error: --output-format capability-sdk requires discovery mode (provide -d <domain> with credentials).")
 		flag.Usage()
 		os.Exit(1)
 	}
-	// Strip tabularium from formats if -do is used (discovery-only mode)
-	if config.DiscoveryOnly && hasTabularium {
+	// Strip structured-output formats if -do is used (discovery-only mode).
+	if config.DiscoveryOnly && hasStructuredOutput {
 		var filtered []string
 		for _, f := range config.OutputFormats {
-			if f != "tabularium" {
+			if f != "tabularium" && f != "capability-sdk" {
 				filtered = append(filtered, f)
 			}
 		}
@@ -205,8 +209,8 @@ func Main(version string) {
 	var targets []Target
 	if hasDiscovery {
 		var err error
-		// Fetch SIDs if tabularium output is requested
-		fetchSIDs := hasTabularium && !config.DiscoveryOnly
+		// Fetch SIDs if structured output (capability-sdk/tabularium) is requested.
+		fetchSIDs := hasStructuredOutput && !config.DiscoveryOnly
 		var discoveryResult *DiscoveryResult
 		targets, discoveryResult, err = discoverTargets(config, fetchSIDs)
 		if err != nil {
@@ -355,7 +359,12 @@ func Main(version string) {
 		printSummary(results, totalScanTime)
 	}
 
-	// Generate tabularium output if requested
+	// Generate structured (capability-sdk / tabularium) output if requested.
+	if hasCapabilitySDK && config.DiscoveryResult != nil {
+		if err := generateCapabilitySDKOutput(config, results); err != nil {
+			logf("[-] Failed to generate capability-sdk output: %v\n", err)
+		}
+	}
 	if hasTabularium && config.DiscoveryResult != nil {
 		if err := generateTabulariumOutput(config, results); err != nil {
 			logf("[-] Failed to generate tabularium output: %v\n", err)
@@ -561,7 +570,7 @@ func parseArgs(version string) Config {
 	flag.StringVar(&keywords, "kw", "", "Filename substrings to always include (shorthand)")
 
 	// Output options (note: -o is handled manually after flag.Parse for optional argument support)
-	flag.StringVar(&outputFormats, "output-format", "", "Output formats to save (comma-separated: txt,json,jsonl,sarif,tabularium)")
+	flag.StringVar(&outputFormats, "output-format", "", "Output formats to save (comma-separated: txt,json,jsonl,sarif,capability-sdk)")
 	flag.StringVar(&outputFormats, "of", "", "Output formats to save (shorthand)")
 	flag.BoolVar(&config.Verbose, "verbose", false, "Show per-share progress (connections, scan lifecycle)")
 	flag.BoolVar(&config.Verbose, "v", false, "Show per-share progress (shorthand)")
@@ -633,7 +642,7 @@ func parseArgs(version string) Config {
 		logln("\nOutput:")
 		logln("  -o <path>           Single target: output file (default: <host>_<share>.txt)")
 		logln("                      Batch mode: output directory (must exist)")
-		logln("  --output-format, -of  Output formats to save (comma-separated: txt,json,jsonl,sarif,tabularium)")
+		logln("  --output-format, -of  Output formats to save (comma-separated: txt,json,jsonl,sarif,capability-sdk)")
 		logln("                        Default: txt. Requires -o flag.")
 		logln("  --zip, -z           Zip all txt/json output files and delete originals. Requires -o flag.")
 		logln("  -v, --verbose       Show per-share progress (connections, scan lifecycle)")
@@ -769,17 +778,12 @@ func parseArgs(version string) Config {
 	}
 
 	// Parse output formats
-	validFormats := map[string]bool{"txt": true, "json": true, "jsonl": true, "sarif": true, "tabularium": true}
-	if outputFormats != "" {
-		for _, format := range strings.Split(outputFormats, ",") {
-			format = strings.TrimSpace(strings.ToLower(format))
-			if !validFormats[format] {
-				logf("Error: Invalid output format '%s'. Valid formats: txt, json, jsonl, sarif, tabularium\n", format)
-				os.Exit(1)
-			}
-			config.OutputFormats = append(config.OutputFormats, format)
-		}
+	formats, err := validateOutputFormats(outputFormats)
+	if err != nil {
+		logf("Error: %v\n", err)
+		os.Exit(1)
 	}
+	config.OutputFormats = append(config.OutputFormats, formats...)
 
 	// Generate default output filename if -o was used without a filename (single target mode only)
 	// For batch mode (including auto-discovery), the OutputFile is treated as a directory and validated in main()

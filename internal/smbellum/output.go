@@ -16,6 +16,31 @@ import (
 	titustypes "github.com/praetorian-inc/titus/pkg/types"
 )
 
+// validateOutputFormats parses a comma-separated --output-format value and
+// returns the list of canonical formats. Empty input yields an empty list.
+func validateOutputFormats(input string) ([]string, error) {
+	valid := map[string]bool{
+		"txt":            true,
+		"json":           true,
+		"jsonl":          true,
+		"sarif":          true,
+		"capability-sdk": true,
+		"tabularium":     true,
+	}
+	var out []string
+	if input == "" {
+		return out, nil
+	}
+	for _, format := range strings.Split(input, ",") {
+		format = strings.TrimSpace(strings.ToLower(format))
+		if !valid[format] {
+			return nil, fmt.Errorf("invalid output format %q. Valid formats: txt, json, jsonl, sarif, capability-sdk", format)
+		}
+		out = append(out, format)
+	}
+	return out, nil
+}
+
 // sanitizeFilename replaces characters that are problematic in filenames
 func sanitizeFilename(s string) string {
 	// Replace dots and other problematic characters with underscores
@@ -460,22 +485,22 @@ func outputDiscoveredShares(config Config, targets []Target) {
 }
 
 // resolveOutputFormats returns the list of formats to write to disk. It strips
-// "tabularium" (handled separately by generateTabulariumOutput) and falls back
-// to ["txt"] when nothing is requested.
+// "capability-sdk" and "tabularium" (handled by their own emitters) and falls
+// back to ["txt"] when nothing is requested.
 //
-// When tabularium is requested alongside a non-txt format (e.g. -of sarif,tabularium),
-// the .txt file must still be written: the tabularium proof blob is built by
-// reading ScanResult.OutputPath (a .txt path) and passing it through
-// redactProofContent, which depends on the text format's "  Match:" prefix
-// markers. Without this, the proof content degrades to "[Could not read output
-// file: ...]".
+// When a structured format is requested alongside a non-txt format
+// (e.g. -of sarif,capability-sdk), the .txt file must still be written: the
+// structured proof blob is built by reading ScanResult.OutputPath (a .txt
+// path) and passing it through redactProofContent, which depends on the text
+// format's "  Match:" prefix markers. Without this, the proof content
+// degrades to "[Could not read output file: ...]".
 func resolveOutputFormats(requested []string) []string {
 	var out []string
-	hasTabularium := false
+	hasStructured := false
 	hasTxt := false
 	for _, f := range requested {
-		if f == "tabularium" {
-			hasTabularium = true
+		if f == "tabularium" || f == "capability-sdk" {
+			hasStructured = true
 			continue
 		}
 		if f == "txt" {
@@ -483,7 +508,7 @@ func resolveOutputFormats(requested []string) []string {
 		}
 		out = append(out, f)
 	}
-	if hasTabularium && !hasTxt {
+	if hasStructured && !hasTxt {
 		out = append([]string{"txt"}, out...)
 	}
 	if len(out) == 0 {
