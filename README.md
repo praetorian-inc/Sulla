@@ -145,7 +145,7 @@ Custom exclusions are always additive to the defaults. Use `--no-default-exclusi
 | Flag | Description |
 |------|-------------|
 | `--output [path]`, `-o [path]` | Save report output. Single target: filename (default: `{host}__{share}.txt`). Batch mode: directory |
-| `--output-format`, `-of` | Output formats to save (comma-separated: `txt`, `json`, `jsonl`, `sarif`, `tabularium`). Default: `txt` |
+| `--output-format`, `-of` | Output formats to save (comma-separated: `txt`, `json`, `jsonl`, `sarif`, `capability-sdk`). Default: `txt` |
 | `--zip`, `-z` | Zip txt/json output files into a single archive and delete originals (requires `-o`) |
 | `--verbose`, `-v` | Show per-share progress (connections, scan lifecycle) |
 | `--debug`, `-de` | Show per-file diagnostics (skipped files, errors, chunking) |
@@ -193,9 +193,9 @@ Use `--show-default-exclusions` to see the complete list, or `--no-default-exclu
 | `json` | JSON format for programmatic processing |
 | `jsonl` | JSON Lines format (one finding per line) |
 | `sarif` | SARIF format for integration with security tools |
-| `tabularium` | [Tabularium](https://github.com/praetorian-inc/tabularium) format (discovery mode only). The tabularium evidence blob redacts match values from its embedded proof content |
+| `capability-sdk` | JSON file matching the [capability-sdk](https://github.com/praetorian-inc/capability-sdk) `capmodel` wire format (discovery mode only). Written as `<domain>.tabularium`. The evidence blob redacts match values from its embedded proof content. `tabularium` is accepted as a deprecated alias for one release |
 
-> **Note:** Redaction applies only to the `tabularium` format. The `txt`, `json`, `jsonl`, and `sarif` outputs contain raw match content and should be handled as sensitive.
+> **Note:** Redaction applies only to the `capability-sdk` format. The `txt`, `json`, `jsonl`, and `sarif` outputs contain raw match content and should be handled as sensitive.
 
 
 ## Notes
