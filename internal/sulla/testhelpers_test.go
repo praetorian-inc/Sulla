@@ -1,4 +1,4 @@
-package smbellum
+package sulla
 
 import (
 	"bytes"

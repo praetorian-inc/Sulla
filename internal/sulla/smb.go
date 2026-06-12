@@ -1,4 +1,4 @@
-package smbellum
+package sulla
 
 import (
 	"context"
@@ -74,12 +74,12 @@ func checkShareAccess(session *smb2.Session, shareName string) bool {
 // non-thread-safe NSS modules. The cgo resolver is the CGO_ENABLED=1 default,
 // which the vectorscan/Hyperscan build forces; pure-Go builds never use it.
 //
-// Escape hatch: set SMBELLUM_SYSTEM_RESOLVER (any value) to fall back to the
+// Escape hatch: set SULLA_SYSTEM_RESOLVER (any value) to fall back to the
 // system (cgo) resolver for environments that depend on NSS-only name sources
 // such as mDNS or sssd. Has no effect in pure-Go builds.
 func getResolver(dnsServer string) *net.Resolver {
 	if dnsServer == "" {
-		if os.Getenv("SMBELLUM_SYSTEM_RESOLVER") != "" {
+		if os.Getenv("SULLA_SYSTEM_RESOLVER") != "" {
 			return net.DefaultResolver
 		}
 		return &net.Resolver{PreferGo: true}

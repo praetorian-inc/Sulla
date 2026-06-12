@@ -1,4 +1,4 @@
-package smbellum
+package sulla
 
 import (
 	"encoding/json"
@@ -126,7 +126,7 @@ func generateCapabilitySDKOutput(config Config, results []ScanResult) error {
 			TargetName: hostLower,
 			Name:       "smb-exposed-secrets",
 			Title:      "Secrets in Network Shares",
-			Source:     "smbellum:TITUS",
+			Source:     "sulla:TITUS",
 			Status:     "TM",
 			Proof:      []byte(proofContent.String()),
 			Target:     json.RawMessage(targetItem),

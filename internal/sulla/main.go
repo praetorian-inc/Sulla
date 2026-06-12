@@ -1,4 +1,4 @@
-package smbellum
+package sulla
 
 import (
 	"bufio"
@@ -21,8 +21,8 @@ import (
 	titustypes "github.com/praetorian-inc/titus/pkg/types"
 )
 
-// Main is the entry point for the smbellum CLI.
-// The version string is injected from cmd/smbellum via build-time ldflags.
+// Main is the entry point for the sulla CLI.
+// The version string is injected from cmd/sulla via build-time ldflags.
 func Main(version string) {
 	config := parseArgs(version)
 
