@@ -1,4 +1,4 @@
-module github.com/praetorian-inc/SMBellum
+module github.com/praetorian-inc/Sulla
 
 go 1.25.3
 

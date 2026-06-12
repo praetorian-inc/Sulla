@@ -1,4 +1,4 @@
-package smbellum
+package sulla
 
 import (
 	"bufio"
@@ -234,7 +234,7 @@ func (st *shareTracker) startTicker() {
 	}()
 }
 
-// outputFileTracker collects paths of files created by smbellum for zip packaging.
+// outputFileTracker collects paths of files created by sulla for zip packaging.
 type outputFileTracker struct {
 	mu    sync.Mutex
 	paths []string
@@ -254,5 +254,5 @@ func (t *outputFileTracker) list() []string {
 	return out
 }
 
-// createdFiles tracks all output files smbellum writes, for --zip packaging.
+// createdFiles tracks all output files sulla writes, for --zip packaging.
 var createdFiles = &outputFileTracker{}

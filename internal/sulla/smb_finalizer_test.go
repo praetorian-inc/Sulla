@@ -1,4 +1,4 @@
-package smbellum
+package sulla
 
 import (
 	"os"
@@ -10,7 +10,7 @@ import (
 
 // TestGoSMB2ForkPresent is a build-time guard that fails if the in-tree
 // fork of github.com/hirochachacha/go-smb2 is missing. The fork patches
-// a finalizer-driven panic that crashed smbellum during AD-wide share
+// a finalizer-driven panic that crashed sulla during AD-wide share
 // discovery (see third_party/go-smb2/NOTICE.md). If the fork is deleted
 // or the `replace` directive in go.mod is removed, scans regress to a
 // process-killing panic that no application-level recover() can catch.

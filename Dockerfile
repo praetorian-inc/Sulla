@@ -25,11 +25,11 @@ COPY . .
 
 RUN CGO_ENABLED=1 GOWORK=off go build -tags vectorscan \
     -ldflags '-s -w -extldflags "-static"' \
-    -o /smbellum ./cmd/smbellum
+    -o /sulla ./cmd/sulla
 
 # Runtime stage
 FROM --platform=linux/amd64 debian:bookworm-slim
 
-COPY --from=builder /smbellum /smbellum
+COPY --from=builder /sulla /sulla
 
-ENTRYPOINT ["/smbellum"]
+ENTRYPOINT ["/sulla"]

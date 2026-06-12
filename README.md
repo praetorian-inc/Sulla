@@ -1,4 +1,4 @@
-# SMBellum
+# Sulla
 
 <p align="center">
   <img width="600" alt="image" src="https://github.com/user-attachments/assets/ed6e0ebe-040a-4672-ab69-9128913c7207" />
@@ -19,29 +19,29 @@ You can:
 
 ## Installation
 
-Download the appropriate SMBellum binary for your platform from [Releases](https://github.com/praetorian-inc/SMBellum/releases):
+Download the appropriate Sulla binary for your platform from [Releases](https://github.com/praetorian-inc/Sulla/releases):
 ```bash
 # Linux x86_64
-wget -O smbellum https://github.com/praetorian-inc/SMBellum/releases/latest/download/smbellum-linux-amd64
+wget -O sulla https://github.com/praetorian-inc/Sulla/releases/latest/download/sulla-linux-amd64
 
 # Linux ARM64
-wget -O smbellum https://github.com/praetorian-inc/SMBellum/releases/latest/download/smbellum-linux-arm64
+wget -O sulla https://github.com/praetorian-inc/Sulla/releases/latest/download/sulla-linux-arm64
 ```
 
 ### Docker
 
-Alternatively, run SMBellum via Docker without installing dependencies:
+Alternatively, run Sulla via Docker without installing dependencies:
 
 ```bash
-docker pull ghcr.io/praetorian-inc/smbellum:latest
+docker pull ghcr.io/praetorian-inc/sulla:latest
 ```
 
 Docker usage:
 
 ```bash
 docker run --rm --privileged --network=host \
-  -v $(pwd):/smbellum_output -w /smbellum_output \
-  ghcr.io/praetorian-inc/smbellum:latest \
+  -v $(pwd):/sulla_output -w /sulla_output \
+  ghcr.io/praetorian-inc/sulla:latest \
   -u admin -p secret123 -d corp.local -o results -of txt,json
 ```
 
@@ -53,10 +53,10 @@ Automatically discover and scan all accessible SMB shares across an Active Direc
 
 ```bash
 # Auto-discover all accessible shares and write results to txt and json files
-smbellum -u admin -p secret123 -d corp.local -o results/ -of txt,json
+sulla -u admin -p secret123 -d corp.local -o results/ -of txt,json
 ```
 
-> SMBellum discovers domain controllers via DNS SRV records (`_ldap._tcp.dc._msdcs.<domain>`). If the first DC is unreachable, it automatically tries others.
+> Sulla discovers domain controllers via DNS SRV records (`_ldap._tcp.dc._msdcs.<domain>`). If the first DC is unreachable, it automatically tries others.
 
 ### Discovery-Only Mode
 
@@ -64,7 +64,7 @@ Discover accessible shares without running Titus scans. Outputs UNC paths that c
 
 ```bash
 # Discover reachable shares without secret scanning
-smbellum -u admin -p secret123 -d corp.local -do -o
+sulla -u admin -p secret123 -d corp.local -do -o
 ```
 
 Useful when:
@@ -77,7 +77,7 @@ Scan a predefined list of shares:
 
 ```bash
 # Scan targets from file
-smbellum -tf corp_local_discovered_smb_shares.txt -u admin -p secret123 -d corp.local -o results/
+sulla -tf corp_local_discovered_smb_shares.txt -u admin -p secret123 -d corp.local -o results/
 ```
 
 Target file format (one per line):
@@ -92,10 +92,10 @@ Scan a specific share:
 
 ```bash
 # Basic scan, anonymous
-smbellum -h 192.168.1.100 -s public
+sulla -h 192.168.1.100 -s public
 
 # With domain credentials + saving output
-smbellum -h fileserver.corp.local -s SYSVOL -u admin -p secret123 -d corp.local -o results/
+sulla -h fileserver.corp.local -s SYSVOL -u admin -p secret123 -d corp.local -o results/
 ```
 
 ## Options
@@ -155,9 +155,9 @@ Custom exclusions are always additive to the defaults. Use `--no-default-exclusi
 
 ### Scanning
 
-**Quick mode is on by default.** SMBellum only scans high-value file types (allowlisted extensions and filenames), with depth 5, 15 min/share, and 200 files/dir.
+**Quick mode is on by default.** Sulla only scans high-value file types (allowlisted extensions and filenames), with depth 5, 15 min/share, and 200 files/dir.
 
-**Full mode is set with --full.** All files will be scanned for secrets, sans those in SMBellum's default exclusions list. These default exclusions can be disabled with `--no-default-exclusions`. Full scans will run for much longer than Quick scans and are not recommended when scanning multiple shares.
+**Full mode is set with --full.** All files will be scanned for secrets, sans those in Sulla's default exclusions list. These default exclusions can be disabled with `--no-default-exclusions`. Full scans will run for much longer than Quick scans and are not recommended when scanning multiple shares.
 
 | Flag | Description |
 |------|-------------|
@@ -177,7 +177,7 @@ Custom exclusions are always additive to the defaults. Use `--no-default-exclusi
 
 ## Default Exclusions
 
-SMBellum skips scanning files, folders, and shares that are unlikely to contain secrets.
+Sulla skips scanning files, folders, and shares that are unlikely to contain secrets.
 
 **Shares:**
 - `IPC$`, `print$`, `ADMIN$`

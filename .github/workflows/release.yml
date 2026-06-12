@@ -1,4 +1,4 @@
-# SMBellum Release Workflow - Creates binaries for all platforms
+# Sulla Release Workflow - Creates binaries for all platforms
 #
 # Builds with Hyperscan/Vectorscan for high-performance SIMD-accelerated regex matching.
 # All binaries are statically linked - no runtime dependencies required.
@@ -88,16 +88,16 @@ jobs:
         CGO_LDFLAGS: "-L/usr/local/lib -lhs -lstdc++ -lm"
       run: |
         mkdir -p dist
-        GOWORK=off go build -tags "cgo vectorscan" -ldflags "-s -w -extldflags \"-static\" -X main.version=${VERSION}" -o dist/smbellum-linux-amd64 ./cmd/smbellum
-        chmod +x dist/smbellum-linux-amd64
-        file dist/smbellum-linux-amd64
-        ldd dist/smbellum-linux-amd64 || true
+        GOWORK=off go build -tags "cgo vectorscan" -ldflags "-s -w -extldflags \"-static\" -X main.version=${VERSION}" -o dist/sulla-linux-amd64 ./cmd/sulla
+        chmod +x dist/sulla-linux-amd64
+        file dist/sulla-linux-amd64
+        ldd dist/sulla-linux-amd64 || true
 
     - name: Upload artifact
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
       with:
-        name: smbellum-linux-amd64
-        path: dist/smbellum-linux-amd64
+        name: sulla-linux-amd64
+        path: dist/sulla-linux-amd64
 
   # Build Linux arm64 with vectorscan (ARM port of hyperscan)
   build-linux-arm64:
@@ -143,16 +143,16 @@ jobs:
         CGO_LDFLAGS: "-L/usr/local/lib -lhs -lstdc++ -lm"
       run: |
         mkdir -p dist
-        GOWORK=off go build -tags "cgo vectorscan" -ldflags "-s -w -extldflags \"-static\" -X main.version=${VERSION}" -o dist/smbellum-linux-arm64 ./cmd/smbellum
-        chmod +x dist/smbellum-linux-arm64
-        file dist/smbellum-linux-arm64
-        ldd dist/smbellum-linux-arm64 || true
+        GOWORK=off go build -tags "cgo vectorscan" -ldflags "-s -w -extldflags \"-static\" -X main.version=${VERSION}" -o dist/sulla-linux-arm64 ./cmd/sulla
+        chmod +x dist/sulla-linux-arm64
+        file dist/sulla-linux-arm64
+        ldd dist/sulla-linux-arm64 || true
 
     - name: Upload artifact
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
       with:
-        name: smbellum-linux-arm64
-        path: dist/smbellum-linux-arm64
+        name: sulla-linux-arm64
+        path: dist/sulla-linux-arm64
 
   # Build macOS binaries (static vectorscan/hyperscan linked in)
   build-macos:
@@ -243,16 +243,16 @@ jobs:
         export CGO_LDFLAGS="/tmp/hs-install/lib/libhs.a -lc++"
 
         mkdir -p dist
-        GOWORK=off go build -tags "cgo vectorscan" -ldflags "-s -w -X main.version=${VERSION}" -o dist/smbellum-darwin-${{ matrix.arch }} ./cmd/smbellum
-        chmod +x dist/smbellum-darwin-${{ matrix.arch }}
-        file dist/smbellum-darwin-${{ matrix.arch }}
-        otool -L dist/smbellum-darwin-${{ matrix.arch }}
+        GOWORK=off go build -tags "cgo vectorscan" -ldflags "-s -w -X main.version=${VERSION}" -o dist/sulla-darwin-${{ matrix.arch }} ./cmd/sulla
+        chmod +x dist/sulla-darwin-${{ matrix.arch }}
+        file dist/sulla-darwin-${{ matrix.arch }}
+        otool -L dist/sulla-darwin-${{ matrix.arch }}
 
     - name: Upload artifact
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
       with:
-        name: smbellum-darwin-${{ matrix.arch }}
-        path: dist/smbellum-darwin-${{ matrix.arch }}
+        name: sulla-darwin-${{ matrix.arch }}
+        path: dist/sulla-darwin-${{ matrix.arch }}
 
   # Build Windows binary using MSYS2/MinGW (compatible with Go CGO)
   build-windows:
@@ -358,14 +358,14 @@ jobs:
         pkg-config --cflags --libs libhs
 
         mkdir -p dist
-        go build -tags "cgo vectorscan" -ldflags "-s -w -extldflags \"-static\" -X main.version=${VERSION}" -o dist/smbellum-windows-amd64.exe ./cmd/smbellum
+        go build -tags "cgo vectorscan" -ldflags "-s -w -extldflags \"-static\" -X main.version=${VERSION}" -o dist/sulla-windows-amd64.exe ./cmd/sulla
         ls -la dist/
 
     - name: Upload artifact
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
       with:
-        name: smbellum-windows-amd64
-        path: dist/smbellum-windows-amd64.exe
+        name: sulla-windows-amd64
+        path: dist/sulla-windows-amd64.exe
 
   # Create GitHub release with all artifacts
   release:
@@ -390,11 +390,11 @@ jobs:
         mkdir -p release
 
         # Move binaries
-        mv artifacts/smbellum-linux-amd64/smbellum-linux-amd64 release/
-        mv artifacts/smbellum-linux-arm64/smbellum-linux-arm64 release/ || true
-        mv artifacts/smbellum-darwin-arm64/smbellum-darwin-arm64 release/
-        mv artifacts/smbellum-darwin-amd64/smbellum-darwin-amd64 release/
-        mv artifacts/smbellum-windows-amd64/smbellum-windows-amd64.exe release/
+        mv artifacts/sulla-linux-amd64/sulla-linux-amd64 release/
+        mv artifacts/sulla-linux-arm64/sulla-linux-arm64 release/ || true
+        mv artifacts/sulla-darwin-arm64/sulla-darwin-arm64 release/
+        mv artifacts/sulla-darwin-amd64/sulla-darwin-amd64 release/
+        mv artifacts/sulla-windows-amd64/sulla-windows-amd64.exe release/
 
         # Create checksums
         cd release
@@ -405,7 +405,7 @@ jobs:
     - name: Generate release notes
       run: |
         cat > release_notes.md << 'NOTES_EOF'
-        ## SMBellum
+        ## Sulla
 
         All binaries include high-performance Hyperscan/Vectorscan regex matching
         for secret detection. No runtime dependencies required.
@@ -414,11 +414,11 @@ jobs:
 
         | Platform | Architecture | File |
         |----------|-------------|------|
-        | Linux | x64 | `smbellum-linux-amd64` |
-        | Linux | arm64 | `smbellum-linux-arm64` |
-        | macOS | Apple Silicon | `smbellum-darwin-arm64` |
-        | macOS | Intel | `smbellum-darwin-amd64` |
-        | Windows | x64 | `smbellum-windows-amd64.exe` |
+        | Linux | x64 | `sulla-linux-amd64` |
+        | Linux | arm64 | `sulla-linux-arm64` |
+        | macOS | Apple Silicon | `sulla-darwin-arm64` |
+        | macOS | Intel | `sulla-darwin-amd64` |
+        | Windows | x64 | `sulla-windows-amd64.exe` |
 
         ### Installation
 
@@ -426,8 +426,8 @@ jobs:
 
         **Linux/macOS:**
         ```bash
-        chmod +x smbellum-*
-        sudo mv smbellum-* /usr/local/bin/smbellum
+        chmod +x sulla-*
+        sudo mv sulla-* /usr/local/bin/sulla
         ```
 
         **Windows:** Run the .exe directly or add to PATH.

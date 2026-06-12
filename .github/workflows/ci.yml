@@ -42,4 +42,4 @@ jobs:
 
     - name: Verify binary exists
       run: |
-        test -x ./dist/smbellum || (echo "Binary not created" && exit 1)
+        test -x ./dist/sulla || (echo "Binary not created" && exit 1)
