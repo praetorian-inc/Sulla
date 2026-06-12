@@ -1,12 +1,13 @@
 # Sulla
 
 <p align="center">
-  <img width="600" alt="image" src="https://github.com/user-attachments/assets/ed6e0ebe-040a-4672-ab69-9128913c7207" />
+  <img width="600" alt="image" src="https://github.com/user-attachments/assets/51cd1920-7ca6-46c5-94ad-ed36a9a40c96" />
 </p>
 
 ***
 
-A command-line tool to scan SMB shares for sensitive data using [Titus](https://github.com/praetorian-inc/titus).
+A command-line tool to scan SMB shares for sensitive data using [Titus](https://github.com/praetorian-inc/titus).<img width="1286" height="985" alt="demo" src="https://github.com/user-attachments/assets/c58a0e1a-7462-49cd-99c9-62addd22544a" />
+
 
 You can:
 * Automatically discover and scan SMB shares on AD-joined hosts
@@ -15,7 +16,7 @@ You can:
 
 * Save output in txt, json, jsonl, or sarif format
 
-![demo](https://github.com/user-attachments/assets/9f4ef1d3-5ca3-46b7-a70d-4fac52eb3037)
+![demo](https://github.com/user-attachments/assets/cc37df6c-52f5-4f70-8321-061acba18c5e)
 
 ## Installation
 
