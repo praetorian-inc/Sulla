@@ -69,6 +69,11 @@ func checkShareAccess(session *smb2.Session, shareName string) bool {
 // server directly; otherwise it returns a resolver that prefers Go's built-in
 // resolver over cgo's getaddrinfo.
 //
+// When a SOCKS proxy and a custom DNS server are both set, DNS queries are
+// tunneled over TCP through the proxy (see dnsStreamAsPacketConn), so internal
+// names resolve via the specified server regardless of the pivot host's own
+// resolver. Without a proxy, the custom DNS server is queried directly over UDP.
+//
 // Preferring the Go resolver avoids SIGSEGVs inside glibc getaddrinfo that occur
 // when many discovery workers resolve concurrently on hosts with broken or
 // non-thread-safe NSS modules. The cgo resolver is the CGO_ENABLED=1 default,
@@ -77,7 +82,22 @@ func checkShareAccess(session *smb2.Session, shareName string) bool {
 // Escape hatch: set SULLA_SYSTEM_RESOLVER (any value) to fall back to the
 // system (cgo) resolver for environments that depend on NSS-only name sources
 // such as mDNS or sssd. Has no effect in pure-Go builds.
-func getResolver(dnsServer string) *net.Resolver {
+func getResolver(config Config) *net.Resolver {
+	dnsServer := config.DNSServer
+
+	// Proxy + custom DNS: resolve via DNS-over-TCP through the SOCKS proxy.
+	// Returning a stream conn (rather than a net.PacketConn) makes the pure-Go
+	// resolver use its DNS-over-TCP path — length-prefix framing and all — which
+	// is exactly what we want, since SOCKS cannot carry UDP.
+	if config.proxyDialer != nil && dnsServer != "" {
+		return &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+				return dialTCP(ctx, config, dnsServerAddr(dnsServer), 5*time.Second)
+			},
+		}
+	}
+
 	if dnsServer == "" {
 		if os.Getenv("SULLA_SYSTEM_RESOLVER") != "" {
 			return net.DefaultResolver
@@ -89,19 +109,28 @@ func getResolver(dnsServer string) *net.Resolver {
 		PreferGo: true,
 		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
 			d := net.Dialer{Timeout: 5 * time.Second}
-			return d.DialContext(ctx, "udp", dnsServer+":53")
+			return d.DialContext(ctx, "udp", dnsServerAddr(dnsServer))
 		},
 	}
 }
 
-func resolveHostToIP(host, dnsServer string) string {
+// dnsServerAddr returns the DNS server as host:port. A bare IP/host gets the
+// default DNS port 53; an address that already carries a port is used as-is.
+func dnsServerAddr(dnsServer string) string {
+	if _, _, err := net.SplitHostPort(dnsServer); err == nil {
+		return dnsServer
+	}
+	return net.JoinHostPort(dnsServer, "53")
+}
+
+func resolveHostToIP(config Config, host string) string {
 	// If it's already an IP address, return as-is
 	if net.ParseIP(host) != nil {
 		return host
 	}
 
 	// Try to resolve hostname to IP using custom resolver if configured
-	resolver := getResolver(dnsServer)
+	resolver := getResolver(config)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
@@ -117,11 +146,16 @@ func resolveHostToIP(host, dnsServer string) string {
 // smbConnect establishes an SMB session and mounts the target share.
 // The caller must call share.Umount() and session.Logoff() when done.
 func smbConnect(ctx context.Context, config Config) (net.Conn, *smb2.Session, *smb2.Share, error) {
-	ip := resolveHostToIP(config.Host, config.DNSServer)
+	// Resolve locally unless we're proxying without a DNS server, in which case
+	// the hostname is handed to the proxy for remote resolution.
+	target := config.Host
+	if shouldResolveLocally(config) {
+		target = resolveHostToIP(config, config.Host)
+	}
 
-	conn, err := net.DialTimeout("tcp", ip+":445", 3*time.Second)
+	conn, err := dialTCP(ctx, config, net.JoinHostPort(target, "445"), 3*time.Second)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("SMB connection to %s (%s) failed: %w", config.Host, ip, err)
+		return nil, nil, nil, fmt.Errorf("SMB connection to %s (%s) failed: %w", config.Host, target, err)
 	}
 
 	// Cap SMB negotiation + auth + mount to 30s total
