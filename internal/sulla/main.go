@@ -140,6 +140,17 @@ func Main(version string) {
 		}
 	}
 
+	// SRV-based DC auto-discovery needs DNS, which can't traverse SOCKS over UDP.
+	// Require either an explicit -dc or a -dns server (whose queries are tunneled
+	// over TCP through the proxy) when proxying in discovery mode.
+	if proxyRequiresExplicitDC(config) {
+		logln("Error: --socks5 discovery requires either -dc <host> or -dns <ip>.")
+		logln("       SRV-based DC auto-discovery needs DNS; pass -dns <internal-ip> to tunnel")
+		logln("       DNS through the proxy, or name a domain controller with -dc <host>.")
+		flag.Usage()
+		os.Exit(1)
+	}
+
 	// Validate that at least one input method is provided
 	if !hasDiscovery && !hasTargetFile && !hasHostShare {
 		logln("Error: Provide -d <domain> with credentials for auto-discovery,")
@@ -576,6 +587,8 @@ func parseArgs(version string) Config {
 	flag.BoolVar(&config.ChannelBinding, "channel-binding", false, "Require NTLMv2+CBT on LDAPS; refuse simple-bind fallback (prevents cleartext credential exposure)")
 	flag.StringVar(&config.DNSServer, "dns-server", "", "Custom DNS server IP for hostname resolution")
 	flag.StringVar(&config.DNSServer, "dns", "", "Custom DNS server IP (shorthand)")
+	flag.StringVar(&config.SocksProxy, "socks5", "", "Route all traffic (SMB, LDAP, DNS) through a SOCKS5 proxy ([user:pass@]host:port)")
+	flag.StringVar(&config.SocksProxy, "socks", "", "SOCKS5 proxy (shorthand)")
 	flag.BoolVar(&config.DiscoveryOnly, "discovery-only", false, "Discovery only: output shares in UNC format without scanning")
 	flag.BoolVar(&config.DiscoveryOnly, "do", false, "Discovery only (shorthand)")
 	flag.BoolVar(&config.NoDFS, "no-dfs", false, "Disable DFS namespace awareness (skip DFS deduplication)")
@@ -623,6 +636,10 @@ func parseArgs(version string) Config {
 		logln("  --ldaps             Force LDAPS only (skip plain LDAP fallback)")
 		logln("  --channel-binding   Require NTLMv2 with RFC 5929 channel binding; no simple-bind fallback")
 		logln("  --dns-server, -dns  Custom DNS server IP for DC discovery and hostname resolution")
+		logln("  --socks5, --socks   Route all traffic (SMB, LDAP, DNS) through a SOCKS5 proxy")
+		logln("                      Format: [user:pass@]host:port (e.g. 127.0.0.1:1080)")
+		logln("                      For domain discovery, add -dns <internal-ip> (tunnels DNS")
+		logln("                      through the proxy) or name a DC with -dc <host>")
 		logln("  --discovery-only, -do  Discovery only: output shares in UNC format, skip scanning")
 		logln("  --no-dfs              Disable DFS namespace awareness (skip DFS deduplication)")
 		logln("\nFiltering (supports regex patterns):")
@@ -820,6 +837,16 @@ func parseArgs(version string) Config {
 
 	// Enable interesting exclusions CSV when output is being saved
 	config.InterestingExcl = config.SaveOutput
+
+	// Build the SOCKS5 dialer once; every connection path shares it via dialTCP.
+	if config.SocksProxy != "" {
+		d, err := buildProxyDialer(config.SocksProxy)
+		if err != nil {
+			logf("Error: %v\n", err)
+			os.Exit(1)
+		}
+		config.proxyDialer = d
+	}
 
 	// Activate timestamps after arg validation / help text is done
 	timestampMode = wantTimestamps

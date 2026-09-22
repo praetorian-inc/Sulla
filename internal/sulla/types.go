@@ -8,6 +8,7 @@ import (
 
 	titusscanner "github.com/praetorian-inc/titus/pkg/scanner"
 	titustypes "github.com/praetorian-inc/titus/pkg/types"
+	"golang.org/x/net/proxy"
 )
 
 // titusCore is the shared Titus scanner instance, initialized once in main().
@@ -46,6 +47,8 @@ type Config struct {
 	UseLDAPS          bool             // Use LDAPS (port 636) instead of LDAP (port 389)
 	ChannelBinding    bool             // Require NTLMv2+CBT on LDAPS; disables simple-bind fallback
 	DNSServer         string           // Custom DNS server IP for lookups
+	SocksProxy        string           // Raw --socks5 value ([user:pass@]host:port); "" = disabled
+	proxyDialer       proxy.Dialer     // SOCKS5 dialer built once in parseArgs; nil = direct dial
 	DiscoveryOnly     bool             // Discovery-only mode: output shares without scanning
 	DiscoveryResult   *DiscoveryResult // AD discovery metadata for capability-sdk output
 	ShareWorkers      int              // Number of parallel share workers (default 60)

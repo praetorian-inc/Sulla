@@ -96,6 +96,35 @@ sulla -h 192.168.1.100 -s public
 sulla -h fileserver.corp.local -s SYSVOL -u admin -p secret123 -d corp.local -o results/
 ```
 
+### Pivoting through a SOCKS5 proxy
+
+Go binaries make network syscalls directly and bypass libc, so `proxychains` (which hooks libc via `LD_PRELOAD`) has no effect on Sulla. Use the native `--socks5` flag to pivot through a SOCKS5 proxy such as `ssh -D`, [chisel](https://github.com/jpillora/chisel), or [Ligolo-ng](https://github.com/nicocha30/ligolo-ng):
+
+```bash
+# Bring up a SOCKS5 proxy into the target network (example: SSH dynamic forward)
+ssh -D 1080 -N pivot-host
+
+# Scan a single share through the proxy
+sulla --socks5 127.0.0.1:1080 -h fileserver.corp.local -s Data -u admin -p secret -d corp.local
+
+# Domain-wide discovery through the proxy, resolving names via an internal DNS server
+sulla --socks5 127.0.0.1:1080 -dns 10.0.0.10 -u admin -p secret -d corp.local -do
+
+# Domain-wide discovery naming the DC explicitly (no DNS server needed)
+sulla --socks5 127.0.0.1:1080 -dc dc01.corp.local -u admin -p secret -d corp.local -do
+
+# Authenticated proxy
+sulla --socks5 user:pass@127.0.0.1:1080 -dns 10.0.0.10 -u admin -p secret -d corp.local -do
+```
+
+Behavior when a proxy is set:
+
+- **All traffic is proxied** — SMB (445), LDAP/LDAPS (389/636), and DNS.
+- **DNS resolution.** By default, hostnames are resolved by the proxy at the pivot host (like proxychains `proxy_dns`). This works only if the pivot host can resolve the target names. When it can't — a common case — add `-dns <internal-ip>` and Sulla tunnels DNS **over TCP through the proxy** to that server, so internal names (including hosts discovered from AD) resolve correctly.
+- **Domain discovery needs `-dns` or `-dc`.** SRV-based DC auto-discovery requires DNS, which can't traverse SOCKS over UDP. Either pass `-dns <internal-ip>` (auto-discovery then works end to end through a bare `ssh -D` tunnel), or name a controller explicitly with `-dc <host>`. Without either, Sulla exits with an error.
+
+> Docker users: point Sulla at a proxy on the host with `--socks5 host.docker.internal:1080`.
+
 ## Options
 
 ### Target Selection
@@ -122,7 +151,8 @@ sulla -h fileserver.corp.local -s SYSVOL -u admin -p secret123 -d corp.local -o 
 |------|-------------|
 | `--ldaps` | Use LDAPS instead of LDAP |
 | `--channel-binding` | Require NTLMv2 with RFC 5929 channel binding on LDAPS |
-| `--dns-server`, `-dns` | Custom DNS server IP for hostname resolution |
+| `--dns-server`, `-dns` | Custom DNS server IP for hostname resolution. With `--socks5`, queries are tunneled over TCP through the proxy |
+| `--socks5`, `--socks` | Route all traffic (SMB, LDAP, DNS) through a SOCKS5 proxy: `[user:pass@]host:port`. See [Pivoting through a SOCKS5 proxy](#pivoting-through-a-socks5-proxy) |
 | `--discovery-only`, `-do` | Discovery only: output shares in UNC format without scanning |
 | `--no-dfs` | Disable DFS namespace awareness (skip DFS deduplication) |
 

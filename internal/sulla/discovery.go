@@ -68,7 +68,7 @@ func discoverTargets(config Config, fetchSIDs bool) ([]Target, *DiscoveryResult,
 	} else {
 		// Auto-discover DCs via DNS SRV lookup
 		logf("[*] Discovering domain controllers for %s...\n", config.Domain)
-		dcs, err := discoverDomainControllers(config.Domain, config.DNSServer)
+		dcs, err := discoverDomainControllers(config)
 		if err != nil {
 			return nil, nil, fmt.Errorf("could not auto-discover domain controller for %s: %w\n\nProvide a domain controller explicitly with -dc <hostname>\nor try a different DNS server with -dns <ip>", config.Domain, err)
 		}
@@ -194,8 +194,9 @@ func discoverTargets(config Config, fetchSIDs bool) ([]Target, *DiscoveryResult,
 }
 
 // discoverDomainControllers performs DNS SRV lookup to find domain controllers for a domain
-func discoverDomainControllers(domain, dnsServer string) ([]string, error) {
-	resolver := getResolver(dnsServer)
+func discoverDomainControllers(config Config) ([]string, error) {
+	domain := config.Domain
+	resolver := getResolver(config)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -228,6 +229,47 @@ func discoverDomainControllers(domain, dnsServer string) ([]string, error) {
 	return dcs, nil
 }
 
+// dialLDAP opens an *ldap.Conn to host:port. In direct mode it uses go-ldap's
+// DialURL (the well-tested default path). In proxy mode it dials the connection
+// itself through the SOCKS proxy — passing the hostname for remote DNS — wraps
+// it in TLS when useTLS is set, and hands the conn to ldap.NewConn. This detour
+// is required because go-ldap's DialWithDialer only accepts a concrete
+// *net.Dialer and cannot take a SOCKS dialer.
+func dialLDAP(config Config, host, port string, useTLS bool, tlsConfig *tls.Config) (*ldap.Conn, error) {
+	if config.proxyDialer == nil {
+		scheme := "ldap"
+		if useTLS {
+			scheme = "ldaps"
+		}
+		url := fmt.Sprintf("%s://%s", scheme, net.JoinHostPort(host, port))
+		if useTLS {
+			return ldap.DialURL(url, ldap.DialWithTLSConfig(tlsConfig))
+		}
+		return ldap.DialURL(url)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	raw, err := dialTCP(ctx, config, net.JoinHostPort(host, port), 10*time.Second)
+	if err != nil {
+		return nil, err
+	}
+
+	var netConn net.Conn = raw
+	if useTLS {
+		tconn := tls.Client(raw, tlsConfig)
+		if err := tconn.HandshakeContext(ctx); err != nil {
+			raw.Close()
+			return nil, fmt.Errorf("LDAPS TLS handshake failed: %w", err)
+		}
+		netConn = tconn
+	}
+
+	l := ldap.NewConn(netConn, useTLS)
+	l.Start()
+	return l, nil
+}
+
 // connectToLDAP establishes an LDAP connection to the specified domain controller.
 // Returns the connection, a description of the method used, and any error.
 //
@@ -238,14 +280,17 @@ func discoverDomainControllers(domain, dnsServer string) ([]string, error) {
 //
 // --ldaps: attempts 1 and 2 only; plain LDAP skipped.
 // --channel-binding: attempt 1 only; failure returns an error rather than
-//   falling back to simple bind. Use to guarantee the operator's password
-//   never transits as cleartext, even inside a TLS tunnel.
+//
+//	falling back to simple bind. Use to guarantee the operator's password
+//	never transits as cleartext, even inside a TLS tunnel.
 func connectToLDAP(dc string, config Config) (*ldap.Conn, string, error) {
-	// Resolve DC hostname using custom DNS server if configured
+	// Resolve DC hostname using custom DNS server if configured. When proxying
+	// without a DNS server, skip local resolution and let the proxy resolve the
+	// hostname (remote DNS at the pivot host).
 	dcAddr := dc
-	if net.ParseIP(dc) == nil {
+	if shouldResolveLocally(config) && net.ParseIP(dc) == nil {
 		// It's a hostname, resolve it
-		resolver := getResolver(config.DNSServer)
+		resolver := getResolver(config)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
@@ -271,7 +316,7 @@ func connectToLDAP(dc string, config Config) (*ldap.Conn, string, error) {
 	// Attempt 1: LDAPS + channel binding (NTLM)
 	if config.ChannelBinding || config.UseLDAPS || autoNegotiate {
 		var lastErr error
-		l, err := ldap.DialURL(fmt.Sprintf("ldaps://%s:636", dcAddr), ldap.DialWithTLSConfig(tlsConfig))
+		l, err := dialLDAP(config, dcAddr, "636", true, tlsConfig)
 		if err == nil {
 			if bindErr := bindNTLMWithCBT(ntlmChallengeBindAdapter{c: l}, config); bindErr == nil {
 				return l, "LDAPS (NTLMv2 + channel binding)", nil
@@ -294,7 +339,7 @@ func connectToLDAP(dc string, config Config) (*ldap.Conn, string, error) {
 	// Attempt 2: LDAPS + simple bind
 	if config.UseLDAPS || autoNegotiate {
 		var lastErr error
-		l, err := ldap.DialURL(fmt.Sprintf("ldaps://%s:636", dcAddr), ldap.DialWithTLSConfig(tlsConfig))
+		l, err := dialLDAP(config, dcAddr, "636", true, tlsConfig)
 		if err == nil {
 			if bindErr := l.Bind(bindUser, config.Password); bindErr == nil {
 				return l, "LDAPS", nil
@@ -313,7 +358,7 @@ func connectToLDAP(dc string, config Config) (*ldap.Conn, string, error) {
 
 	// Attempt 3: Plain LDAP (port 389)
 	if autoNegotiate {
-		l, err := ldap.DialURL(fmt.Sprintf("ldap://%s:389", dcAddr))
+		l, err := dialLDAP(config, dcAddr, "389", false, nil)
 		if err == nil {
 			if bindErr := l.Bind(bindUser, config.Password); bindErr == nil {
 				return l, "LDAP", nil
@@ -445,21 +490,28 @@ func discoverComputers(config Config, domainControllers []string, fetchSIDs bool
 
 // discoverSharesOnHost enumerates SMB shares on a host and returns those with read access
 func discoverSharesOnHost(host string, config Config, compiledExclusions []*regexp.Regexp) ([]string, error) {
-	// Resolve hostname to IP using custom resolver if configured
-	resolver := getResolver(config.DNSServer)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
+	// Resolve locally unless we're proxying without a DNS server, in which case
+	// the hostname is handed to the proxy for remote resolution.
+	target := host
+	if shouldResolveLocally(config) {
+		resolver := getResolver(config)
+		rctx, rcancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer rcancel()
 
-	ips, err := resolver.LookupHost(ctx, host)
-	if err != nil {
-		return nil, fmt.Errorf("DNS resolution failed: %w", err)
-	}
-	if len(ips) == 0 {
-		return nil, fmt.Errorf("no IP addresses found")
+		ips, err := resolver.LookupHost(rctx, host)
+		if err != nil {
+			return nil, fmt.Errorf("DNS resolution failed: %w", err)
+		}
+		if len(ips) == 0 {
+			return nil, fmt.Errorf("no IP addresses found")
+		}
+		target = ips[0]
 	}
 
 	// Connect to SMB
-	conn, err := net.DialTimeout("tcp", ips[0]+":445", 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	conn, err := dialTCP(ctx, config, net.JoinHostPort(target, "445"), 3*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("connection failed: %w", err)
 	}
