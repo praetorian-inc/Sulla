@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	titusscanner "github.com/praetorian-inc/titus/pkg/scanner"
+	titustypes "github.com/praetorian-inc/titus/pkg/types"
 )
 
 const validRuleOne = `rules:
@@ -167,5 +168,61 @@ func TestCustomRule_ProducesDetection(t *testing.T) {
 	}
 	if result.Matches[0].RuleID != "custom.test.1" {
 		t.Errorf("expected match from custom.test.1, got %q", result.Matches[0].RuleID)
+	}
+}
+
+func TestLoadCustomRules_ExtendedModePatternAccepted(t *testing.T) {
+	dir := t.TempDir()
+	// (?x) extended/verbose mode is supported by Titus's regexp2 matcher and is
+	// used by many built-in rules, but Go's stdlib regexp rejects it. Such a
+	// rule must load and scan, not be rejected at load time.
+	rule := "rules:\n- name: Extended Mode Rule\n  id: custom.extended.1\n  pattern: |\n    (?x)\n    EXTMODE-\n    [A-Z0-9]{8}\n"
+	path := writeRule(t, dir, "ext.yml", rule)
+
+	rules, err := loadCustomRules([]string{path})
+	if err != nil {
+		t.Fatalf("expected extended-mode rule to load, got error: %v", err)
+	}
+	if len(rules) != 1 || rules[0].ID != "custom.extended.1" {
+		t.Fatalf("expected 1 extended-mode rule (custom.extended.1), got %d rules", len(rules))
+	}
+
+	core, err := titusscanner.NewCoreWithRules(rules, nil, nil)
+	if err != nil {
+		t.Fatalf("NewCoreWithRules: %v", err)
+	}
+	defer core.Close()
+	res, err := core.Scan("token EXTMODE-ABCD1234 here", "t.txt")
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(res.Matches) == 0 {
+		t.Fatal("expected extended-mode rule to match")
+	}
+}
+
+func TestLoadCustomRules_DuplicateCustomID(t *testing.T) {
+	dir := t.TempDir()
+	writeRule(t, dir, "a.yml", validRuleOne)
+	// Same ID as validRuleOne (custom.test.1) in a different file.
+	dup := "rules:\n- name: Duplicate ID\n  id: custom.test.1\n  pattern: 'OTHER-[0-9]{3}'\n"
+	writeRule(t, dir, "b.yml", dup)
+
+	_, err := loadCustomRules([]string{dir})
+	if err == nil {
+		t.Fatal("expected error for duplicate custom rule ID across files, got nil")
+	}
+}
+
+func TestBuiltinIDConflict(t *testing.T) {
+	custom := []*titustypes.Rule{{ID: "acme.token.1"}, {ID: "acme.token.2"}}
+	builtin := []*titustypes.Rule{{ID: "np.aws.1"}, {ID: "acme.token.2"}}
+
+	if got := builtinIDConflict(custom, builtin); got != "acme.token.2" {
+		t.Errorf("expected conflict acme.token.2, got %q", got)
+	}
+	// Disjoint sets -> no conflict.
+	if got := builtinIDConflict(custom[:1], builtin[:1]); got != "" {
+		t.Errorf("expected no conflict, got %q", got)
 	}
 }

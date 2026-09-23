@@ -87,6 +87,10 @@ func Main(version string) {
 				logf("Error: Failed to load custom rules: %v\n", err)
 				os.Exit(1)
 			}
+			if id := builtinIDConflict(customRules, allRules); id != "" {
+				logf("Error: custom rule ID %q conflicts with a built-in rule; rename it to a unique ID\n", id)
+				os.Exit(1)
+			}
 			if config.CustomRulesOnly {
 				filteredRules = customRules
 			} else {
