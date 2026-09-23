@@ -169,6 +169,37 @@ Behavior when a proxy is set:
 
 Custom exclusions are always additive to the defaults. Use `--no-default-exclusions` to start from a clean slate.
 
+### Custom Rules
+
+Bring your own [Titus](https://github.com/praetorian-inc/titus) detection rules for secrets specific to your environment.
+
+| Flag | Description |
+|------|-------------|
+| `--custom-rules`, `-cr` | Custom rule files or directories, added to the built-in rules (comma-separated). Each path is a `.yml`/`.yaml` file or a directory that is walked recursively |
+| `--custom-rules-only`, `-cro` | Scan with **only** the custom rules, ignoring the built-in ruleset (requires `--custom-rules`) |
+
+Rules use the NoseyParker/Titus YAML format, **one rule per file**. A minimal rule:
+
+```yaml
+rules:
+- name: Acme Internal Token
+  id: acme.token.1
+  pattern: 'ACME-[A-Z0-9]{10}'
+```
+
+```bash
+# Add a single custom rule on top of the built-in ruleset
+sulla -h fileserver.corp.local -s Data --custom-rules ./acme-token.yml
+
+# Load every rule in a directory
+sulla -u admin -p secret -d corp.local -cr ./my-rules/
+
+# Scan using only your custom rules
+sulla -h fileserver.corp.local -s Data -cr ./my-rules/ --custom-rules-only
+```
+
+By default custom rules are **additive** to the built-in ruleset. Use `--custom-rules-only` to scan with just your own rules.
+
 ### Output
 
 | Flag | Description |

@@ -62,6 +62,8 @@ type Config struct {
 	MaxFilesPerDir    int              // Maximum files to scan per directory (0 = unlimited)
 	QuickMode         bool             // Quick mode: only scan high-value file types
 	Keywords          []string         // Additional filename substrings to always include in scanning
+	CustomRules       []string         // Paths to custom Titus rule files/directories (one rule per YAML file)
+	CustomRulesOnly   bool             // Scan with ONLY the custom rules, ignoring the built-in ruleset
 	InterestingExcl   bool             // Write interesting exclusions (keyword/quick match but skipped) to CSV (on when -o is set)
 	ZipOutput         bool             // Zip txt/json output files into a single archive, then delete originals
 	ExtractBinary     bool             // --extract: enable text extraction from binary files (docx, xlsx, pdf, etc.)
