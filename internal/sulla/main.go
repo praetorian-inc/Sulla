@@ -78,6 +78,26 @@ func Main(version string) {
 			logf("Error: Failed to filter rules: %v\n", err)
 			os.Exit(1)
 		}
+		// Load user-supplied custom rules (one rule per YAML file) and either
+		// append them to the built-in set or, with --custom-rules-only, use them
+		// on their own.
+		if len(config.CustomRules) > 0 {
+			customRules, err := loadCustomRules(config.CustomRules)
+			if err != nil {
+				logf("Error: Failed to load custom rules: %v\n", err)
+				os.Exit(1)
+			}
+			if config.CustomRulesOnly {
+				filteredRules = customRules
+			} else {
+				filteredRules = append(filteredRules, customRules...)
+			}
+			// Include custom rules in the SARIF rule cache so custom findings
+			// carry full rule metadata in SARIF output.
+			titusAllRules = append(titusAllRules, customRules...)
+			logf("[*] Loaded %d custom rule(s) from %d path(s)\n", len(customRules), len(config.CustomRules))
+		}
+
 		if len(filteredRules) == 0 {
 			logf("Warning: no rules matched the default ruleset — scanner will find nothing\n")
 		}
@@ -571,6 +591,13 @@ func parseArgs(version string) Config {
 	flag.StringVar(&keywords, "keywords", "", "Filename substrings to always include in scanning (comma-separated)")
 	flag.StringVar(&keywords, "kw", "", "Filename substrings to always include (shorthand)")
 
+	// Custom rules (one Titus rule per YAML file; paths may be files or directories)
+	var customRules string
+	flag.StringVar(&customRules, "custom-rules", "", "Custom Titus rule files or directories, added to the built-in rules (comma-separated)")
+	flag.StringVar(&customRules, "cr", "", "Custom Titus rule files or directories (shorthand)")
+	flag.BoolVar(&config.CustomRulesOnly, "custom-rules-only", false, "Scan with ONLY the custom rules, ignoring the built-in ruleset (requires --custom-rules)")
+	flag.BoolVar(&config.CustomRulesOnly, "cro", false, "Scan with only the custom rules (shorthand)")
+
 	// Output options (note: -o is handled manually after flag.Parse for optional argument support)
 	flag.StringVar(&outputFormats, "output-format", "", "Output formats to save (comma-separated: txt,json,jsonl,sarif,capability-sdk)")
 	flag.StringVar(&outputFormats, "of", "", "Output formats to save (shorthand)")
@@ -648,6 +675,9 @@ func parseArgs(version string) Config {
 		logln("  --exclude-extensions, -xe     Additional file extensions to exclude (comma-separated)")
 		logln("  --exclude-directories, -xd    Additional directories to exclude (comma-separated)")
 		logln("  --exclude-shares, -xs         Share names to exclude during discovery (comma-separated)")
+		logln("\nCustom Rules (one Titus rule per YAML file):")
+		logln("  --custom-rules, -cr           Custom rule files or directories, added to built-ins (comma-separated)")
+		logln("  --custom-rules-only, -cro     Scan with ONLY the custom rules (requires --custom-rules)")
 		logln("\nOutput:")
 		logln("  -o <path>           Single target: output file (default: <host>_<share>.txt)")
 		logln("                      Batch mode: output directory (must exist)")
@@ -777,6 +807,20 @@ func parseArgs(version string) Config {
 				config.Keywords = append(config.Keywords, kw)
 			}
 		}
+	}
+
+	if customRules != "" {
+		for _, p := range strings.Split(customRules, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				config.CustomRules = append(config.CustomRules, p)
+			}
+		}
+	}
+	if config.CustomRulesOnly && len(config.CustomRules) == 0 {
+		logln("Error: --custom-rules-only requires --custom-rules")
+		flag.Usage()
+		os.Exit(1)
 	}
 
 	// Parse excluded shares (start with defaults, add user-specified)
