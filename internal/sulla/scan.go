@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/hirochachacha/go-smb2"
@@ -191,7 +192,7 @@ func bytesToString(b []byte) string {
 // scanFileSMB reads a file directly from an SMB share and scans it with Titus.
 // Uses a single share.Open() call (saves 1 SMB round-trip vs the old two-open approach).
 // headerBuf is caller-provided via sync.Pool to avoid per-file allocation.
-func scanFileSMB(config Config, share *smb2.Share, path string, size int64, interesting bool,
+func scanFileSMB(config Config, share *smb2.Share, path string, size int64, interesting bool, created, modified time.Time,
 	headerBuf []byte, skippedFiles *int64) ([]fileMatch, *interestingExclusion) {
 
 	const largeFileThreshold = 50 * 1024 * 1024
@@ -272,7 +273,7 @@ func scanFileSMB(config Config, share *smb2.Share, path string, size int64, inte
 				continue
 			}
 			for _, m := range result.Matches {
-				matches = append(matches, fileMatch{match: m, filePath: compoundPath, severity: ruleSeverity(m.RuleID)})
+				matches = append(matches, fileMatch{match: m, filePath: compoundPath, severity: ruleSeverity(m.RuleID), created: created, modified: modified})
 			}
 		}
 		return matches, nil
@@ -314,7 +315,7 @@ func scanFileSMB(config Config, share *smb2.Share, path string, size int64, inte
 			return nil, nil
 		}
 		for _, m := range result.Matches {
-			matches = append(matches, fileMatch{match: m, filePath: displayPath, severity: ruleSeverity(m.RuleID)})
+			matches = append(matches, fileMatch{match: m, filePath: displayPath, severity: ruleSeverity(m.RuleID), created: created, modified: modified})
 		}
 	} else {
 		// Large file: chunked reading via smb2 file handle
@@ -346,7 +347,7 @@ func scanFileSMB(config Config, share *smb2.Share, path string, size int64, inte
 					key := m.RuleID + "|" + string(m.Snippet.Matching)
 					if !seen[key] {
 						seen[key] = true
-						matches = append(matches, fileMatch{match: m, filePath: displayPath, severity: ruleSeverity(m.RuleID)})
+						matches = append(matches, fileMatch{match: m, filePath: displayPath, severity: ruleSeverity(m.RuleID), created: created, modified: modified})
 					}
 				}
 			}
@@ -469,7 +470,7 @@ func runTitusScanSMB(ctx context.Context, config Config, share *smb2.Share) (Sca
 				if ctx.Err() != nil {
 					return
 				}
-				matches, excl := scanFileSMB(config, share, job.path, job.size, job.interesting, headerBuf, &skippedFiles)
+				matches, excl := scanFileSMB(config, share, job.path, job.size, job.interesting, job.created, job.modified, headerBuf, &skippedFiles)
 				atomic.AddInt64(&fileCount, 1)
 				if excl != nil && exclCh != nil {
 					exclCh <- *excl
@@ -484,7 +485,7 @@ func runTitusScanSMB(ctx context.Context, config Config, share *smb2.Share) (Sca
 	}
 
 	// Producer: walk share and send eligible files to workers
-	err := smbWalkDir(ctx, share, ".", excludedDirs, config.MaxDepth, config.MaxFilesPerDir, &dirCount, func(path string, size int64) error {
+	err := smbWalkDir(ctx, share, ".", excludedDirs, config.MaxDepth, config.MaxFilesPerDir, &dirCount, func(path string, size int64, created, modified time.Time) error {
 		// Keyword matches override all exclusion logic
 		keywordMatch := false
 		if len(config.Keywords) > 0 {
@@ -513,7 +514,7 @@ func runTitusScanSMB(ctx context.Context, config Config, share *smb2.Share) (Sca
 		// Mark as interesting if keyword matched or (quick mode and passed allowlist)
 		interesting := keywordMatch || config.QuickMode
 		select {
-		case jobs <- fileJob{path: path, size: size, interesting: interesting}:
+		case jobs <- fileJob{path: path, size: size, interesting: interesting, created: created, modified: modified}:
 		case <-ctx.Done():
 			return ctx.Err()
 		}

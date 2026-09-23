@@ -192,13 +192,27 @@ func smbConnect(ctx context.Context, config Config) (net.Conn, *smb2.Session, *s
 // Directories are filtered by shouldExcludeDir before recursion.
 // dirCount is atomically incremented for each directory entered.
 func smbWalkDir(ctx context.Context, share *smb2.Share, root string,
-	excludedDirs dirExclusions, maxDepth int, maxFilesPerDir int, dirCount *int64, fn func(path string, size int64) error) error {
+	excludedDirs dirExclusions, maxDepth int, maxFilesPerDir int, dirCount *int64, fn func(path string, size int64, created, modified time.Time) error) error {
 
 	return smbWalkDirRecursive(ctx, share, root, excludedDirs, maxDepth, maxFilesPerDir, 0, dirCount, fn)
 }
 
+// fileTimes extracts the NTFS creation and last-write timestamps from an SMB
+// directory entry. go-smb2's ReadDir populates these via *smb2.FileStat.Sys();
+// returns zero times if the concrete type doesn't expose them.
+//
+// go-smb2 builds these via time.Unix, so the returned values are in the
+// scanning host's local timezone (the absolute instant is correct). Output
+// formatters print an explicit UTC offset so the rendered time is unambiguous.
+func fileTimes(entry os.FileInfo) (created, modified time.Time) {
+	if fs, ok := entry.Sys().(*smb2.FileStat); ok {
+		return fs.CreationTime, fs.LastWriteTime
+	}
+	return time.Time{}, time.Time{}
+}
+
 func smbWalkDirRecursive(ctx context.Context, share *smb2.Share, dir string,
-	excludedDirs dirExclusions, maxDepth int, maxFilesPerDir int, currentDepth int, dirCount *int64, fn func(path string, size int64) error) error {
+	excludedDirs dirExclusions, maxDepth int, maxFilesPerDir int, currentDepth int, dirCount *int64, fn func(path string, size int64, created, modified time.Time) error) error {
 
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -234,7 +248,8 @@ func smbWalkDirRecursive(ctx context.Context, share *smb2.Share, dir string,
 			if maxFilesPerDir > 0 && fileCount >= maxFilesPerDir {
 				continue
 			}
-			if err := fn(fullPath, entry.Size()); err != nil {
+			created, modified := fileTimes(entry)
+			if err := fn(fullPath, entry.Size(), created, modified); err != nil {
 				return err
 			}
 			fileCount++

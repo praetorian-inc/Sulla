@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	titusscanner "github.com/praetorian-inc/titus/pkg/scanner"
 	titustypes "github.com/praetorian-inc/titus/pkg/types"
@@ -464,6 +465,8 @@ type fileMatch struct {
 	match    *titustypes.Match
 	filePath string
 	severity Severity
+	created  time.Time // NTFS creation timestamp of the source file, zero if unavailable
+	modified time.Time // NTFS last-write timestamp of the source file, zero if unavailable
 }
 
 // dirExclusions holds both O(1) exact-match names and compiled regex patterns for directories to skip.
@@ -476,7 +479,9 @@ type dirExclusions struct {
 type fileJob struct {
 	path        string
 	size        int64
-	interesting bool // matched keyword or quick mode allowlist
+	interesting bool      // matched keyword or quick mode allowlist
+	created     time.Time // NTFS creation timestamp, zero if unavailable
+	modified    time.Time // NTFS last-write timestamp, zero if unavailable
 }
 
 // interestingExclusion records a file that matched keyword/quick mode but was skipped.

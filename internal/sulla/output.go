@@ -446,8 +446,10 @@ func outputTitusResults(config Config, matches []fileMatch) error {
 func outputTitusText(w io.Writer, matches []fileMatch) {
 	// Group matches by file
 	type fileGroup struct {
-		path    string
-		matches []fileMatch
+		path     string
+		created  time.Time
+		modified time.Time
+		matches  []fileMatch
 	}
 	seen := make(map[string]int)
 	var groups []fileGroup
@@ -456,13 +458,15 @@ func outputTitusText(w io.Writer, matches []fileMatch) {
 			groups[idx].matches = append(groups[idx].matches, fm)
 		} else {
 			seen[fm.filePath] = len(groups)
-			groups = append(groups, fileGroup{path: fm.filePath, matches: []fileMatch{fm}})
+			groups = append(groups, fileGroup{path: fm.filePath, created: fm.created, modified: fm.modified, matches: []fileMatch{fm}})
 		}
 	}
 
 	fmt.Fprintf(w, "\n=== Titus Scan Results: %d finding(s) in %d file(s) ===\n\n", len(matches), len(groups))
 	for _, g := range groups {
 		fmt.Fprintf(w, "File: %s\n", g.path)
+		fmt.Fprintf(w, "Created: %s\n", formatFileTime(g.created))
+		fmt.Fprintf(w, "Modified: %s\n", formatFileTime(g.modified))
 		fmt.Fprintln(w, strings.Repeat("-", 60))
 		for _, fm := range g.matches {
 			m := fm.match
@@ -474,6 +478,54 @@ func outputTitusText(w io.Writer, matches []fileMatch) {
 			}
 			fmt.Fprintln(w)
 		}
+	}
+}
+
+// fileTimeUnavailable reports whether a file timestamp should be treated as
+// missing. Besides the Go zero value, go-smb2 maps an SMB FILETIME of 0 (which
+// servers return when they don't track a given timestamp) to 1601-01-01, the
+// NTFS epoch, so that must be treated as "unavailable" too.
+func fileTimeUnavailable(t time.Time) bool {
+	return t.IsZero() || t.Year() <= 1601
+}
+
+// formatFileTime renders a file timestamp (creation or last-write) for the text
+// report, or "unknown" when the SMB server didn't return one.
+func formatFileTime(t time.Time) string {
+	if fileTimeUnavailable(t) {
+		return "unknown"
+	}
+	return t.Format("2006-01-02 15:04:05 -07:00")
+}
+
+// formatFileTimeRFC3339 renders a file timestamp for structured output
+// (JSON/JSONL), or "" when the SMB server didn't return one.
+func formatFileTimeRFC3339(t time.Time) string {
+	if fileTimeUnavailable(t) {
+		return ""
+	}
+	return t.Format(time.RFC3339)
+}
+
+// titusJSONMatch is the structured (JSON/JSONL) representation of a single
+// finding. Shared by the "json" and "jsonl" output paths so their schemas
+// cannot drift apart.
+type titusJSONMatch struct {
+	FilePath   string            `json:"file_path"`
+	Severity   string            `json:"severity"`
+	CreatedAt  string            `json:"created_at,omitempty"`
+	ModifiedAt string            `json:"modified_at,omitempty"`
+	Match      *titustypes.Match `json:"match"`
+}
+
+// newTitusJSONMatch builds the structured representation of a finding.
+func newTitusJSONMatch(fm fileMatch) titusJSONMatch {
+	return titusJSONMatch{
+		FilePath:   fm.filePath,
+		Severity:   fm.severity.String(),
+		CreatedAt:  formatFileTimeRFC3339(fm.created),
+		ModifiedAt: formatFileTimeRFC3339(fm.modified),
+		Match:      fm.match,
 	}
 }
 
@@ -490,14 +542,9 @@ func outputTitusToFile(matches []fileMatch, format, path string) error {
 		return nil
 
 	case "json":
-		type jsonMatch struct {
-			FilePath string            `json:"file_path"`
-			Severity string            `json:"severity"`
-			Match    *titustypes.Match `json:"match"`
-		}
-		var out []jsonMatch
+		var out []titusJSONMatch
 		for _, fm := range matches {
-			out = append(out, jsonMatch{FilePath: fm.filePath, Severity: fm.severity.String(), Match: fm.match})
+			out = append(out, newTitusJSONMatch(fm))
 		}
 		data, err := json.MarshalIndent(out, "", "  ")
 		if err != nil {
@@ -512,13 +559,8 @@ func outputTitusToFile(matches []fileMatch, format, path string) error {
 		}
 		defer f.Close()
 		enc := json.NewEncoder(f)
-		type jsonMatch struct {
-			FilePath string            `json:"file_path"`
-			Severity string            `json:"severity"`
-			Match    *titustypes.Match `json:"match"`
-		}
 		for _, fm := range matches {
-			if err := enc.Encode(jsonMatch{FilePath: fm.filePath, Severity: fm.severity.String(), Match: fm.match}); err != nil {
+			if err := enc.Encode(newTitusJSONMatch(fm)); err != nil {
 				return fmt.Errorf("failed to encode JSONL: %w", err)
 			}
 		}
@@ -542,7 +584,10 @@ func outputTitusToFile(matches []fileMatch, format, path string) error {
 			}
 		}
 
-		// Add results
+		// Add results. Note: file created/modified timestamps are intentionally
+		// not emitted here. SARIF has no standard field for source-file
+		// timestamps (they'd have to go in a non-standard property bag), so the
+		// timestamp feature is limited to the txt/json/jsonl formats.
 		for _, fm := range matches {
 			report.AddResult(fm.match, fm.filePath)
 		}

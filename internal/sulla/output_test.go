@@ -55,6 +55,52 @@ func TestFormatDuration(t *testing.T) {
 	}
 }
 
+// ntfsEpoch is what go-smb2 produces for an SMB FILETIME of 0 (a timestamp the
+// server doesn't track): time.Unix maps it to the NTFS epoch, not Go's zero.
+var ntfsEpoch = time.Date(1601, 1, 1, 0, 0, 0, 0, time.UTC)
+
+func TestFormatFileTime(t *testing.T) {
+	valid := time.Date(2026, 9, 7, 21, 33, 47, 0, time.UTC)
+	tests := []struct {
+		name  string
+		input time.Time
+		want  string
+	}{
+		{"go zero value", time.Time{}, "unknown"},
+		{"ntfs epoch (filetime 0)", ntfsEpoch, "unknown"},
+		{"valid time", valid, "2026-09-07 21:33:47 +00:00"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatFileTime(tt.input); got != tt.want {
+				t.Errorf("formatFileTime(%v) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatFileTimeRFC3339(t *testing.T) {
+	valid := time.Date(2026, 9, 7, 21, 33, 47, 0, time.UTC)
+	tests := []struct {
+		name  string
+		input time.Time
+		want  string
+	}{
+		{"go zero value", time.Time{}, ""},
+		{"ntfs epoch (filetime 0)", ntfsEpoch, ""},
+		{"valid time", valid, "2026-09-07T21:33:47Z"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatFileTimeRFC3339(tt.input); got != tt.want {
+				t.Errorf("formatFileTimeRFC3339(%v) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRedactProofContent(t *testing.T) {
 	tests := []struct {
 		name  string
