@@ -9,6 +9,7 @@ require (
 	github.com/praetorian-inc/capability-sdk v0.0.0-20260521173605-4b0d5a7320ae
 	github.com/praetorian-inc/titus v1.1.24
 	golang.org/x/net v0.52.0
+	golang.org/x/sync v0.20.0
 )
 
 replace github.com/Azure/go-ntlmssp => ./third_party/go-ntlmssp
@@ -62,7 +63,6 @@ require (
 	golang.org/x/crypto v0.50.0 // indirect
 	golang.org/x/exp v0.0.0-20251023183803-a4bb9ffd2546 // indirect
 	golang.org/x/oauth2 v0.34.0 // indirect
-	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.43.0 // indirect
 	golang.org/x/text v0.36.0 // indirect
 	golang.org/x/time v0.14.0 // indirect

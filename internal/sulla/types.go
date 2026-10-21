@@ -1,6 +1,7 @@
 package sulla
 
 import (
+	"context"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	titusscanner "github.com/praetorian-inc/titus/pkg/scanner"
 	titustypes "github.com/praetorian-inc/titus/pkg/types"
 	"golang.org/x/net/proxy"
+	"golang.org/x/sync/semaphore"
 )
 
 // titusCore is the shared Titus scanner instance, initialized once in main().
@@ -74,6 +76,14 @@ type Config struct {
 	ExcludedDirs dirExclusions   // Directory exclusion (exact + regex)
 	// Live status tracking (shared across all share goroutines)
 	Tracker *shareTracker
+	// Partitioned global memory budget for file-read buffers, shared (not copied)
+	// across per-target Config copies like Tracker. Reservations <= budgetSmallClassMax
+	// (the numerous ordinary whole-file reads) draw from SmallBudget; the rare
+	// heavyweights (large extractions + the 50MB chunk path) draw from LargeBudget, so
+	// the common files are never queued behind a parked heavyweight (x/sync/semaphore
+	// is FIFO). Peak buffer memory is bounded to SmallBudget+LargeBudget. nil = unbounded.
+	SmallBudget *semaphore.Weighted
+	LargeBudget *semaphore.Weighted
 }
 
 // Target represents a single host/share combination to scan
@@ -491,4 +501,38 @@ type interestingExclusion struct {
 	uncPath string
 	size    int64
 	reason  string // "binary" or "oversize"
+}
+
+// budgetSmallClassMax is the reservation size at or below which a request draws from
+// SmallBudget. Set to 8MB — above the default 5MB --max-scan-size — so ordinary
+// whole-file reads and small-document extractions stay in the small class and are
+// never queued behind a heavyweight. Only large extractions and the 50MB chunk path
+// (the rare true memory hogs) fall to LargeBudget, where reservations are of similar
+// magnitude (~8-50MB) so FIFO ordering is roughly fair. With --max-scan-size 0 or a
+// large value, big whole-file reads intentionally fall to LargeBudget (genuine hogs).
+const budgetSmallClassMax = 8 * 1024 * 1024
+
+// extractBudgetFactor over-reserves for the extraction path, which holds the raw
+// file + extracted text + scan buffers concurrently.
+const extractBudgetFactor = 3
+
+// reserveBytes reserves n bytes from the size-appropriate budget before a buffer is
+// allocated, returning a release func to call when the buffer is done. Pointer
+// receiver: this sits on the per-file hot path (called millions of times), so avoid
+// copying the ~30-field Config on every call. If budgets are nil (unbounded) the
+// release is a no-op. A non-nil error (context cancelled while blocked) means the
+// reservation was NOT made and the caller should skip the file; the returned release
+// is still safe to call.
+func (c *Config) reserveBytes(ctx context.Context, n int64) (release func(), err error) {
+	budget := c.SmallBudget
+	if n > budgetSmallClassMax {
+		budget = c.LargeBudget
+	}
+	if budget == nil {
+		return func() {}, nil
+	}
+	if err := budget.Acquire(ctx, n); err != nil {
+		return func() {}, err
+	}
+	return func() { budget.Release(n) }, nil
 }
