@@ -18,6 +18,17 @@ import (
 	"github.com/praetorian-inc/titus/pkg/enum"
 )
 
+const chunkBufSize = 50 * 1024 * 1024
+
+// chunkPool reuses 50MB buffers for large-file chunked scanning. Stores *[]byte to
+// avoid an allocation on Put (and to satisfy go vet SA6002).
+var chunkPool = sync.Pool{
+	New: func() interface{} { b := make([]byte, chunkBufSize); return &b },
+}
+
+func getChunkBuf() []byte  { return *(chunkPool.Get().(*[]byte)) }
+func putChunkBuf(b []byte) { chunkPool.Put(&b) }
+
 // toUNCPathSMB converts an SMB-relative path (e.g. "dir/subdir/file.txt") to a UNC display path.
 func toUNCPathSMB(smbPath string, config Config) string {
 	rel := strings.ReplaceAll(smbPath, "/", `\`)
@@ -192,7 +203,7 @@ func bytesToString(b []byte) string {
 // scanFileSMB reads a file directly from an SMB share and scans it with Titus.
 // Uses a single share.Open() call (saves 1 SMB round-trip vs the old two-open approach).
 // headerBuf is caller-provided via sync.Pool to avoid per-file allocation.
-func scanFileSMB(config Config, share *smb2.Share, path string, size int64, interesting bool, created, modified time.Time,
+func scanFileSMB(ctx context.Context, config Config, share *smb2.Share, path string, size int64, interesting bool, created, modified time.Time,
 	headerBuf []byte, skippedFiles *int64) ([]fileMatch, *interestingExclusion) {
 
 	const largeFileThreshold = 50 * 1024 * 1024
@@ -244,6 +255,12 @@ func scanFileSMB(config Config, share *smb2.Share, path string, size int64, inte
 	// Extraction path: read full content and extract text from binary formats.
 	// Bypasses header/binary detection since extractable files are always binary.
 	if shouldExtract {
+		release, rerr := config.reserveBytes(ctx, size*extractBudgetFactor)
+		if rerr != nil {
+			return nil, nil // context cancelled while waiting for budget; skip
+		}
+		defer release()
+
 		content := make([]byte, size)
 		n, readErr := io.ReadFull(f, content)
 		if readErr != nil && readErr != io.ErrUnexpectedEOF {
@@ -292,8 +309,20 @@ func scanFileSMB(config Config, share *smb2.Share, path string, size int64, inte
 		return nil, nil
 	}
 
-	var matches []fileMatch
+	// Reserve buffer bytes: small files use `size`; the large path uses a fixed
+	// chunkSize buffer regardless of file size. Binary/oversize files already
+	// returned above, so they never reserve.
+	need := size
+	if size > largeFileThreshold {
+		need = chunkSize
+	}
+	release, rerr := config.reserveBytes(ctx, need)
+	if rerr != nil {
+		return nil, nil // context cancelled while waiting for budget; skip
+	}
+	defer release()
 
+	var matches []fileMatch
 	if size <= largeFileThreshold {
 		// Small file: read full content
 		content := make([]byte, size)
@@ -324,7 +353,8 @@ func scanFileSMB(config Config, share *smb2.Share, path string, size int64, inte
 		}
 		seen := make(map[string]bool)
 		offset := int64(0)
-		chunk := make([]byte, chunkSize)
+		chunk := getChunkBuf()
+		defer putChunkBuf(chunk)
 
 		for offset < size {
 			readSize := int64(chunkSize)
@@ -470,7 +500,7 @@ func runTitusScanSMB(ctx context.Context, config Config, share *smb2.Share) (Sca
 				if ctx.Err() != nil {
 					return
 				}
-				matches, excl := scanFileSMB(config, share, job.path, job.size, job.interesting, job.created, job.modified, headerBuf, &skippedFiles)
+				matches, excl := scanFileSMB(ctx, config, share, job.path, job.size, job.interesting, job.created, job.modified, headerBuf, &skippedFiles)
 				atomic.AddInt64(&fileCount, 1)
 				if excl != nil && exclCh != nil {
 					exclCh <- *excl

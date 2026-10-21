@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +20,7 @@ import (
 	titusrule "github.com/praetorian-inc/titus/pkg/rule"
 	titusscanner "github.com/praetorian-inc/titus/pkg/scanner"
 	titustypes "github.com/praetorian-inc/titus/pkg/types"
+	"golang.org/x/sync/semaphore"
 )
 
 // Main is the entry point for the sulla CLI.
@@ -317,6 +319,8 @@ func Main(version string) {
 	}
 	defer tracker.stop()
 
+	// config.SmallBudget/LargeBudget set during parseArgs are shared (pointer) into
+	// every targetConfig copy below, bounding total file-buffer memory across shares.
 	results := make([]ScanResult, len(targets))
 	sem := make(chan struct{}, config.ShareWorkers)
 	var wg sync.WaitGroup
@@ -628,6 +632,9 @@ func parseArgs(version string) Config {
 	var maxScanSizeMB int
 	flag.IntVar(&maxScanSizeMB, "max-scan-size", 5, "Maximum file size to scan in MB (0 = no limit, default: 5)")
 	flag.IntVar(&maxScanSizeMB, "ms", 5, "Maximum file size to scan in MB (shorthand)")
+	var maxMemoryMB int
+	flag.IntVar(&maxMemoryMB, "max-memory", 2048, "Soft cap on file-buffer memory in MB across all shares (0 = unbounded)")
+	flag.IntVar(&maxMemoryMB, "mm", 2048, "Soft cap on file-buffer memory in MB (shorthand)")
 	flag.IntVar(&config.MaxDepth, "max-depth", 0, "Maximum directory recursion depth (0 = unlimited)")
 	flag.IntVar(&config.MaxDepth, "md", 0, "Maximum directory recursion depth (shorthand)")
 	flag.IntVar(&config.MaxShareTime, "max-share-time", 45, "Maximum time per share in minutes (0 = indefinite, default: 45)")
@@ -700,6 +707,7 @@ func parseArgs(version string) Config {
 		logln("\nConcurrency:")
 		logln("  --share-workers, -jt  Parallel share workers (default: 60)")
 		logf("  --file-workers, -jf   Parallel file scanners per share (default: %d = NumCPU)\n", runtime.NumCPU())
+		logln("  --max-memory, -mm     Soft cap on file-buffer memory in MB across all shares (default: 2048, 0 = unbounded)")
 		logln("\nBuilt-in Exclusions (enabled by default):")
 		logln("  Shares:")
 		logf("    %s\n", strings.Join(defaultExcludedShares, ", "))
@@ -769,6 +777,35 @@ func parseArgs(version string) Config {
 	if maxScanSizeMB > 0 {
 		config.MaxScanSize = int64(maxScanSizeMB) * 1024 * 1024
 	}
+
+	// Partitioned memory budget (see reserveBytes). The small class now holds the bulk
+	// of files, so it gets the larger share; the large class is sized by how many
+	// concurrent heavyweight reads to allow (count-based, not a fraction). LargeBudget
+	// must be >= the largest single acquire (chunkSize = 50MB) or such an acquire would
+	// block forever; it is also capped at 3/4 of total so the small class keeps >= 1/4.
+	if maxMemoryMB > 0 {
+		const chunkSize = 50 * 1024 * 1024
+		const largeBudgetChunks = 20 // ~20 concurrent heavyweight (chunk / large-extraction) reads
+		total := int64(maxMemoryMB) * 1024 * 1024
+		largeBudget := int64(largeBudgetChunks) * chunkSize
+		if largeBudget > total*3/4 {
+			largeBudget = total * 3 / 4
+		}
+		if largeBudget < chunkSize {
+			largeBudget = chunkSize
+		}
+		smallBudget := total - largeBudget
+		if smallBudget < budgetSmallClassMax {
+			smallBudget = budgetSmallClassMax
+		}
+		config.SmallBudget = semaphore.NewWeighted(smallBudget)
+		config.LargeBudget = semaphore.NewWeighted(largeBudget)
+		// Soft GC backstop so an imprecise estimate still can't OOM the process.
+		debug.SetMemoryLimit(total + total/2) // headroom over tracked buffers
+	}
+	// At the 2048MB default: largeBudget = min(20*50MB, 1536MB) = 1000MB (~20 concurrent
+	// heavyweights); smallBudget = 1048MB. Effective minimum --max-memory is ~67MB
+	// (50MB large floor + 8MB small floor + slack); smaller values are clamped up.
 
 	// Show exclusions and exit if requested
 	if showDefaultExclusions {
