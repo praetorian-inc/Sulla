@@ -185,7 +185,10 @@ rules:
 - name: Acme Internal Token
   id: acme.token.1
   pattern: 'ACME-[A-Z0-9]{10}'
+  base_score: 50
 ```
+
+`base_score` is **required** (an integer in the range `0`–`100`) and sets the finding's inherent severity before any scoring modifiers.
 
 ```bash
 # Add a single custom rule on top of the built-in ruleset

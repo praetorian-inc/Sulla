@@ -13,12 +13,14 @@ const validRuleOne = `rules:
 - name: Custom Test Rule One
   id: custom.test.1
   pattern: 'TESTSECRETONE-[0-9]{6}'
+  base_score: 50
 `
 
 const validRuleTwo = `rules:
 - name: Custom Test Rule Two
   id: custom.test.2
   pattern: 'TESTSECRETTWO-[a-f0-9]{8}'
+  base_score: 50
 `
 
 // writeRule writes a rule YAML file into dir and returns its path.
@@ -86,8 +88,9 @@ func TestLoadCustomRules_MultiplePaths(t *testing.T) {
 
 func TestLoadCustomRules_InvalidRule(t *testing.T) {
 	dir := t.TempDir()
-	// Missing pattern -> ValidateRule must reject.
-	path := writeRule(t, dir, "bad.yml", "rules:\n- name: No Pattern\n  id: custom.bad\n")
+	// Missing pattern -> ValidateRule must reject. base_score is present so the
+	// rejection is attributable to the missing pattern, not the missing score.
+	path := writeRule(t, dir, "bad.yml", "rules:\n- name: No Pattern\n  id: custom.bad\n  base_score: 50\n")
 
 	_, err := loadCustomRules([]string{path})
 	if err == nil {
@@ -108,9 +111,11 @@ func TestLoadCustomRules_MultiRuleFileRejected(t *testing.T) {
 - name: Rule A
   id: custom.multi.a
   pattern: 'AAA-[0-9]{4}'
+  base_score: 50
 - name: Rule B
   id: custom.multi.b
   pattern: 'BBB-[0-9]{4}'
+  base_score: 50
 `
 	path := writeRule(t, dir, "multi.yml", multi)
 
@@ -176,7 +181,7 @@ func TestLoadCustomRules_ExtendedModePatternAccepted(t *testing.T) {
 	// (?x) extended/verbose mode is supported by Titus's regexp2 matcher and is
 	// used by many built-in rules, but Go's stdlib regexp rejects it. Such a
 	// rule must load and scan, not be rejected at load time.
-	rule := "rules:\n- name: Extended Mode Rule\n  id: custom.extended.1\n  pattern: |\n    (?x)\n    EXTMODE-\n    [A-Z0-9]{8}\n"
+	rule := "rules:\n- name: Extended Mode Rule\n  id: custom.extended.1\n  base_score: 50\n  pattern: |\n    (?x)\n    EXTMODE-\n    [A-Z0-9]{8}\n"
 	path := writeRule(t, dir, "ext.yml", rule)
 
 	rules, err := loadCustomRules([]string{path})
@@ -205,7 +210,7 @@ func TestLoadCustomRules_DuplicateCustomID(t *testing.T) {
 	dir := t.TempDir()
 	writeRule(t, dir, "a.yml", validRuleOne)
 	// Same ID as validRuleOne (custom.test.1) in a different file.
-	dup := "rules:\n- name: Duplicate ID\n  id: custom.test.1\n  pattern: 'OTHER-[0-9]{3}'\n"
+	dup := "rules:\n- name: Duplicate ID\n  id: custom.test.1\n  pattern: 'OTHER-[0-9]{3}'\n  base_score: 50\n"
 	writeRule(t, dir, "b.yml", dup)
 
 	_, err := loadCustomRules([]string{dir})
