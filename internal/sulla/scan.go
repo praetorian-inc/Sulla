@@ -18,6 +18,17 @@ import (
 	"github.com/praetorian-inc/titus/pkg/enum"
 )
 
+const chunkBufSize = 50 * 1024 * 1024
+
+// chunkPool reuses 50MB buffers for large-file chunked scanning. Stores *[]byte to
+// avoid an allocation on Put (and to satisfy go vet SA6002).
+var chunkPool = sync.Pool{
+	New: func() interface{} { b := make([]byte, chunkBufSize); return &b },
+}
+
+func getChunkBuf() []byte  { return *(chunkPool.Get().(*[]byte)) }
+func putChunkBuf(b []byte) { chunkPool.Put(&b) }
+
 // toUNCPathSMB converts an SMB-relative path (e.g. "dir/subdir/file.txt") to a UNC display path.
 func toUNCPathSMB(smbPath string, config Config) string {
 	rel := strings.ReplaceAll(smbPath, "/", `\`)
@@ -342,7 +353,8 @@ func scanFileSMB(ctx context.Context, config Config, share *smb2.Share, path str
 		}
 		seen := make(map[string]bool)
 		offset := int64(0)
-		chunk := make([]byte, chunkSize)
+		chunk := getChunkBuf()
+		defer putChunkBuf(chunk)
 
 		for offset < size {
 			readSize := int64(chunkSize)

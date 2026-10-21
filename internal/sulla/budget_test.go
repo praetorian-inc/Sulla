@@ -118,3 +118,16 @@ func TestReserveBytesContextCancel(t *testing.T) {
 	}
 	release() // must be a safe no-op on error
 }
+
+func TestChunkPoolRoundTrip(t *testing.T) {
+	b := getChunkBuf()
+	if len(b) != chunkBufSize {
+		t.Fatalf("chunk buffer size = %d, want %d", len(b), chunkBufSize)
+	}
+	putChunkBuf(b)
+	b2 := getChunkBuf()
+	if len(b2) != chunkBufSize {
+		t.Fatalf("reused chunk buffer size = %d, want %d", len(b2), chunkBufSize)
+	}
+	putChunkBuf(b2)
+}
