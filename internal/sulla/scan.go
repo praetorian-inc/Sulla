@@ -271,7 +271,7 @@ func scanFileSMB(ctx context.Context, config Config, share *smb2.Share, path str
 		}
 		content = content[:n]
 
-		extracted, extractErr := enum.ExtractText(path, content, enum.DefaultExtractionLimits())
+		extracted, extractErr := BoundedExtractText(path, content)
 		if extractErr != nil {
 			if config.Debug {
 				logf("[*] Extraction error (skipping): %s: %v\n", displayPath, extractErr)
