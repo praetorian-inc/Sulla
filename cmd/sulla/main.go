@@ -6,5 +6,6 @@ import "github.com/praetorian-inc/Sulla/internal/sulla"
 var version = "dev"
 
 func main() {
+	sulla.MaybeRunExtractWorker()
 	sulla.Main(version)
 }
