@@ -261,6 +261,53 @@ func TestDeduplicateTargetsWithDFS(t *testing.T) {
 	})
 }
 
+func TestDeduplicateDFSReplicas(t *testing.T) {
+	finance := DFSLink{Namespace: "dfs", LinkPath: "finance", DFSPath: `\\corp.local\dfs\finance`}
+	hr := DFSLink{Namespace: "dfs", LinkPath: "hr", DFSPath: `\\corp.local\dfs\hr`}
+
+	t.Run("keeps the same one backend per link in any order", func(t *testing.T) {
+		dfsLinks := map[string][]DFSLink{
+			`fs02.corp.local\finance$`: {finance},
+			`fs01.corp.local\finance$`: {finance},
+		}
+		for _, targets := range [][]Target{
+			{{Host: "fs02.corp.local", Share: "finance$"}, {Host: "fs01.corp.local", Share: "finance$"}, {Host: "dc1.corp.local", Share: "apps"}},
+			{{Host: "dc1.corp.local", Share: "apps"}, {Host: "fs01.corp.local", Share: "finance$"}, {Host: "fs02.corp.local", Share: "finance$"}},
+		} {
+			got, removed := deduplicateDFSReplicas(targets, dfsLinks)
+
+			if removed != 1 || len(got) != 2 {
+				t.Fatalf("got %+v removed=%d, want 2 targets and 1 removed", got, removed)
+			}
+			for _, target := range got {
+				if target.Host == "fs02.corp.local" {
+					t.Errorf("kept the higher replica: %+v", got)
+				}
+				if target.Host == "corp.local" || target.DFSPath != "" {
+					t.Errorf("added a namespace target, which names no computer: %+v", target)
+				}
+			}
+		}
+	})
+
+	t.Run("keeps a replica that is another link's chosen backend", func(t *testing.T) {
+		targets := []Target{
+			{Host: "fs00.corp.local", Share: "data"},
+			{Host: "fs01.corp.local", Share: "data"},
+		}
+		dfsLinks := map[string][]DFSLink{
+			`fs00.corp.local\data`: {finance},
+			`fs01.corp.local\data`: {finance, hr},
+		}
+
+		got, removed := deduplicateDFSReplicas(targets, dfsLinks)
+
+		if removed != 0 || len(got) != 2 {
+			t.Fatalf("got %+v removed=%d, want both kept", got, removed)
+		}
+	})
+}
+
 func TestDeduplicateReplicatedShares(t *testing.T) {
 	t.Run("keeps first SYSVOL, removes duplicates", func(t *testing.T) {
 		targets := []Target{

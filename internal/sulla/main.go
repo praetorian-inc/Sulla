@@ -214,6 +214,7 @@ func Main(version string) {
 		os.Exit(1)
 	}
 	if config.DiscoveryOnly && hasCapabilitySDK {
+		hasCapabilitySDK = false
 		var filtered []string
 		for _, f := range config.OutputFormats {
 			if f != "capability-sdk" {
@@ -243,10 +244,9 @@ func Main(version string) {
 	var targets []Target
 	if hasDiscovery {
 		var err error
-		// Fetch SIDs if capability-sdk output is requested.
-		fetchSIDs := hasCapabilitySDK && !config.DiscoveryOnly
+		// Capability-sdk output needs SIDs and per-computer targets.
 		var discoveryResult *DiscoveryResult
-		targets, discoveryResult, err = discoverTargets(config, fetchSIDs)
+		targets, discoveryResult, err = discoverTargets(config, hasCapabilitySDK)
 		if err != nil {
 			logf("Error during discovery: %v\n", err)
 			os.Exit(1)
@@ -256,6 +256,9 @@ func Main(version string) {
 
 		if len(targets) == 0 {
 			logln("[*] No accessible shares discovered")
+			if hasCapabilitySDK {
+				writeCapabilitySDKOutput(config, nil)
+			}
 			os.Exit(0)
 		}
 
@@ -395,10 +398,8 @@ func Main(version string) {
 		printSummary(results, totalScanTime)
 	}
 
-	if hasCapabilitySDK && config.DiscoveryResult != nil {
-		if err := generateCapabilitySDKOutput(config, results); err != nil {
-			logf("[-] Failed to generate capability-sdk output: %v\n", err)
-		}
+	if hasCapabilitySDK {
+		writeCapabilitySDKOutput(config, results)
 	}
 
 	// Zip output files if requested
@@ -406,6 +407,16 @@ func Main(version string) {
 		if err := zipOutputFiles(config); err != nil {
 			logf("[-] Failed to zip output files: %v\n", err)
 		}
+	}
+}
+
+// writeCapabilitySDKOutput writes the capability-sdk output or exits non-zero,
+// so a caller can treat exit 0 without output as impossible rather than as a
+// scan with no findings.
+func writeCapabilitySDKOutput(config Config, results []ScanResult) {
+	if err := generateCapabilitySDKOutput(config, results); err != nil {
+		logf("[-] Failed to generate capability-sdk output: %v\n", err)
+		os.Exit(1)
 	}
 }
 

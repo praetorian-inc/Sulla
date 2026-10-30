@@ -260,7 +260,9 @@ Use `--show-default-exclusions` to see the complete list, or `--no-default-exclu
 | `json` | JSON format for programmatic processing |
 | `jsonl` | JSON Lines format (one finding per line) |
 | `sarif` | SARIF format for integration with security tools |
-| `capability-sdk` | JSON file matching the [capability-sdk](https://github.com/praetorian-inc/capability-sdk) `capmodel` wire format (discovery mode only). Written as `<domain>.tabularium`. The evidence blob redacts match values from its embedded proof content. `tabularium` is accepted as a deprecated alias for one release |
+| `capability-sdk` | JSON file matching the [capability-sdk](https://github.com/praetorian-inc/capability-sdk) `capmodel` wire format (discovery mode only). Written as `<domain>.json`. The evidence blob redacts match values from its embedded proof content. `tabularium` is accepted as a deprecated alias for one release |
+
+With `capability-sdk`, a run that exits 0 always writes `<domain>.json`: a domain with no accessible share gets the domain object alone, and a failed write exits 1. Every finding is filed on the discovered computer that hosts it, so instead of scanning a DFS namespace Sulla scans one physical backend of each DFS link.
 
 > **Note:** Redaction applies only to the `capability-sdk` format. The `txt`, `json`, `jsonl`, and `sarif` outputs contain raw match content and should be handled as sensitive.
 
