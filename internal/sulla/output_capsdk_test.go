@@ -46,7 +46,7 @@ func TestGenerateCapSDKOutput_Shape(t *testing.T) {
 		t.Fatalf("generateCapabilitySDKOutput: %v", err)
 	}
 
-	out := filepath.Join(tmp, "corp_local.tabularium")
+	out := filepath.Join(tmp, "corp_local.json")
 	data, err := os.ReadFile(out)
 	if err != nil {
 		t.Fatalf("read output: %v", err)
@@ -127,6 +127,42 @@ func TestGenerateCapSDKOutput_Shape(t *testing.T) {
 	}
 	if sawLegacyTabulariumType {
 		t.Error("emitter must not produce lowercase tabularium _type strings")
+	}
+}
+
+// A domain with no accessible share still gets output, so a consumer can tell
+// a clean scan from a failed one.
+func TestGenerateCapSDKOutput_NoSharesWritesDomain(t *testing.T) {
+	tmp := t.TempDir()
+	config := Config{
+		Domain:     "corp.local",
+		OutputFile: tmp,
+		DiscoveryResult: &DiscoveryResult{
+			Domain:    DomainInfo{Name: "corp.local", SID: "S-1-5-21-1-2-3", DistinguishedName: "DC=corp,DC=local"},
+			Computers: map[string]ComputerInfo{},
+		},
+	}
+
+	if err := generateCapabilitySDKOutput(config, nil); err != nil {
+		t.Fatalf("generateCapabilitySDKOutput: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(tmp, "corp_local.json"))
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	var envelope struct {
+		Items []struct {
+			Type     string `json:"_type"`
+			Label    string `json:"label"`
+			ObjectID string `json:"objectid"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		t.Fatalf("envelope unmarshal: %v", err)
+	}
+	if len(envelope.Items) != 1 || envelope.Items[0].Label != "ADDomain" || envelope.Items[0].ObjectID != "S-1-5-21-1-2-3" {
+		t.Fatalf("items = %+v, want only the ADDomain", envelope.Items)
 	}
 }
 

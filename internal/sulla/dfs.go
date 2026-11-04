@@ -362,6 +362,41 @@ func deduplicateTargetsWithDFS(targets []Target, dfsLinks map[string][]DFSLink, 
 	return kept, removed
 }
 
+// deduplicateDFSReplicas keeps one physical backend of each DFS link and drops
+// the other replicas, instead of scanning the namespace. Capability-sdk output
+// files each finding on the computer that hosts it, and a namespace path names
+// no computer. A link keeps its lowest host\share, so the choice does not
+// depend on discovery order.
+func deduplicateDFSReplicas(targets []Target, dfsLinks map[string][]DFSLink) ([]Target, int) {
+	chosen := make(map[string]string) // lowercase DFS path → kept host\share
+	for _, t := range targets {
+		key := strings.ToLower(t.Host + `\` + t.Share)
+		for _, link := range dfsLinks[key] {
+			path := strings.ToLower(link.DFSPath)
+			if current, ok := chosen[path]; !ok || key < current {
+				chosen[path] = key
+			}
+		}
+	}
+	keep := make(map[string]bool, len(chosen))
+	for _, key := range chosen {
+		keep[key] = true
+	}
+
+	var kept []Target
+	removed := 0
+	for _, t := range targets {
+		key := strings.ToLower(t.Host + `\` + t.Share)
+		if _, backsLink := dfsLinks[key]; backsLink && !keep[key] {
+			removed++
+			continue
+		}
+		kept = append(kept, t)
+	}
+
+	return kept, removed
+}
+
 // deduplicateReplicatedShares removes redundant SYSVOL and NETLOGON targets.
 // These shares use DFSR replication and serve identical content on every DC, so scanning one is sufficient.
 // Any host exposing these shares is a DC by definition — we don't rely on the DNS SRV DC list

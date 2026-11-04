@@ -34,9 +34,8 @@ func marshalCapSDKItem(typ string, body any) (json.RawMessage, error) {
 	return json.Marshal(obj)
 }
 
-// generateCapabilitySDKOutput writes a <domain>.tabularium file consumed by
-// the capability-sdk parser. Replaces the hand-rolled Tabularium emitter in
-// output.go.
+// generateCapabilitySDKOutput writes a <domain>.json file in the capability-sdk
+// capmodel wire format.
 func generateCapabilitySDKOutput(config Config, results []ScanResult) error {
 	discovery := config.DiscoveryResult
 	if discovery == nil {
@@ -142,7 +141,7 @@ func generateCapabilitySDKOutput(config Config, results []ScanResult) error {
 	if err != nil {
 		return fmt.Errorf("failed to serialize capsdk output: %w", err)
 	}
-	filename := fmt.Sprintf("%s.tabularium", sanitizeFilename(config.Domain))
+	filename := fmt.Sprintf("%s.json", sanitizeFilename(config.Domain))
 	outputPath := filename
 	if config.OutputFile != "" {
 		if info, err := os.Stat(config.OutputFile); err == nil && info.IsDir() {

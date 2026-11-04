@@ -55,8 +55,9 @@ func sidToString(sidBytes []byte) string {
 	return sid
 }
 
-// discoverTargets orchestrates host and share discovery with parallel workers
-// If fetchSIDs is true, also fetches SIDs for capability-sdk output
+// discoverTargets orchestrates host and share discovery with parallel workers.
+// If fetchSIDs is true, it also fetches SIDs for capability-sdk output and
+// scans one physical backend per DFS link instead of the namespace.
 func discoverTargets(config Config, fetchSIDs bool) ([]Target, *DiscoveryResult, error) {
 	// Step 1: Get list of domain controllers to try
 	var domainControllers []string
@@ -169,7 +170,12 @@ func discoverTargets(config Config, fetchSIDs bool) ([]Target, *DiscoveryResult,
 				logf("[+] Found DFS links covering %d physical share(s)\n", len(dfsLinks))
 			}
 			var removed int
-			targets, removed = deduplicateTargetsWithDFS(targets, dfsLinks, config.Domain)
+			if fetchSIDs {
+				// Capability-sdk output names the computer behind each finding.
+				targets, removed = deduplicateDFSReplicas(targets, dfsLinks)
+			} else {
+				targets, removed = deduplicateTargetsWithDFS(targets, dfsLinks, config.Domain)
+			}
 			if removed > 0 && config.Verbose {
 				logf("[+] DFS dedup: removed %d duplicate target(s), %d target(s) remaining\n", removed, len(targets))
 			}
